@@ -6,7 +6,14 @@ import { supabase } from '../../../../../lib/supabaseClient';
 import { use } from 'react';
 import { useRouter } from 'next/navigation';
 
-type ParticipantFull = {
+type Race = {
+	id: number;
+	name: string;
+	date: string | null;
+	location: string | null;
+};
+
+type ParticipantDB = {
 	id: number;
 	race_id: number;
 	first_name: string;
@@ -19,14 +26,11 @@ type ParticipantFull = {
 	bib_number: number | null;
 	chip: string | null;
 	category_id: number | null;
-	category?: { name: string }[]; // relación opcional
 };
 
-type Race = {
+type CategoryDB = {
 	id: number;
 	name: string;
-	date: string | null;
-	location: string | null;
 };
 
 export default function ParticipantDetailPage({
@@ -41,58 +45,108 @@ export default function ParticipantDetailPage({
 	const router = useRouter();
 
 	const [race, setRace] = useState<Race | null>(null);
-	const [p, setP] = useState<ParticipantFull | null>(null);
+	const [participant, setParticipant] = useState<ParticipantDB | null>(null);
+	const [categoryName, setCategoryName] = useState<string>('—');
+
 	const [err, setErr] = useState('');
+	const [loading, setLoading] = useState(true);
 
 	useEffect(() => {
-		(async () => {
+		let cancelled = false;
+
+		async function load() {
 			setErr('');
+			setLoading(true);
 
-			const [{ data: r, error: er }, { data: pf, error: ep }] =
-				await Promise.all([
-					supabase
-						.from('races')
-						.select('id,name,date,location')
-						.eq('id', raceIdNum)
-						.single(),
-					supabase
-						.from('participants')
-						.select(
-							`
-              id,
-              race_id,
-              first_name,
-              last_name,
-              dni,
-              sex,
-              birth_date,
-              age,
-              distance_km,
-              bib_number,
-              chip,
-              category_id,
-              category(name)
-            `
-						)
-						.eq('race_id', raceIdNum)
-						.eq('id', pId)
-						.single(),
-				]);
+			// 1. Traemos la carrera
+			const { data: rData, error: rErr } = await supabase
+				.from('races')
+				.select('id,name,date,location')
+				.eq('id', raceIdNum)
+				.single();
 
-			if (er) {
-				console.error(er);
-			} else {
-				setRace(r as Race);
+			if (!cancelled) {
+				if (rErr) {
+					console.error(rErr);
+					setRace(null);
+				} else {
+					setRace(rData as Race);
+				}
 			}
 
-			if (ep) {
-				console.error(ep);
-				setErr('No se pudo cargar el participante.');
-				setP(null);
-			} else {
-				setP(pf as ParticipantFull);
+			// 2. Traemos el participante SIN intentar hacer join automático
+			const { data: pData, error: pErr } = await supabase
+				.from('participants')
+				.select(
+					`
+          id,
+          race_id,
+          first_name,
+          last_name,
+          dni,
+          sex,
+          birth_date,
+          age,
+          distance_km,
+          bib_number,
+          chip,
+          category_id
+        `
+				)
+				.eq('race_id', raceIdNum)
+				.eq('id', pId)
+				.single();
+
+			if (pErr) {
+				console.error(pErr);
+				if (!cancelled) {
+					setErr('No se pudo cargar el participante.');
+					setParticipant(null);
+					setCategoryName('—');
+					setLoading(false);
+				}
+				return;
 			}
-		})();
+
+			if (cancelled) return;
+
+			const pRow = pData as ParticipantDB;
+			setParticipant(pRow);
+
+			// 3. Si tiene category_id, buscamos el nombre de la categoría aparte
+			if (pRow.category_id != null) {
+				const { data: cData, error: cErr } = await supabase
+					.from('categories')
+					.select('id,name')
+					.eq('id', pRow.category_id)
+					.single();
+
+				if (cErr) {
+					console.error(cErr);
+					if (!cancelled) {
+						setCategoryName(`ID ${pRow.category_id}`);
+					}
+				} else if (cData) {
+					const cat = cData as CategoryDB;
+					if (!cancelled) {
+						setCategoryName(cat.name || `ID ${pRow.category_id}`);
+					}
+				} else {
+					if (!cancelled) {
+						setCategoryName(`ID ${pRow.category_id}`);
+					}
+				}
+			} else {
+				setCategoryName('—');
+			}
+
+			setLoading(false);
+		}
+
+		load();
+		return () => {
+			cancelled = true;
+		};
 	}, [raceIdNum, pId]);
 
 	function goBack() {
@@ -114,51 +168,67 @@ export default function ParticipantDetailPage({
 							Ficha del participante
 						</h1>
 						<div className='text-sm text-neutral-400'>
-							{race?.name || 'Carrera'} {race?.date ? `· ${race.date}` : ''}{' '}
+							{race?.name || 'Carrera'}
+							{race?.date ? ` · ${race.date}` : ''}{' '}
 							{race?.location ? `· ${race.location}` : ''}
 						</div>
 					</div>
 				</div>
 
-				{/* Contenido */}
+				{/* Tarjeta */}
 				<div className='border border-neutral-800 bg-neutral-900 rounded-2xl overflow-hidden'>
-					{err ? (
-						<div className='p-4 text-red-400'>{err}</div>
-					) : !p ? (
+					{loading ? (
 						<div className='p-4 text-neutral-400'>Cargando…</div>
+					) : err ? (
+						<div className='p-4 text-red-400'>{err}</div>
+					) : !participant ? (
+						<div className='p-4 text-neutral-400'>
+							Participante no encontrado.
+						</div>
 					) : (
 						<div className='divide-y divide-neutral-800'>
+							{/* Datos principales */}
 							<div className='p-4 grid grid-cols-1 sm:grid-cols-2 gap-4'>
 								<Field label='Nombre y apellido'>
 									<span className='font-semibold'>
-										{p.last_name}, {p.first_name}
+										{participant.last_name}, {participant.first_name}
 									</span>
 								</Field>
-								<Field label='DNI'>{p.dni ?? '—'}</Field>
-								<Field label='Sexo'>{p.sex || '—'}</Field>
-								<Field label='Fecha de nacimiento'>{p.birth_date ?? '—'}</Field>
-								<Field label='Edad'>{p.age != null ? p.age : '—'}</Field>
+
+								<Field label='DNI'>{participant.dni ?? '—'}</Field>
+
+								<Field label='Sexo'>{participant.sex || '—'}</Field>
+
+								<Field label='Fecha de nacimiento'>
+									{participant.birth_date ?? '—'}
+								</Field>
+
+								<Field label='Edad'>
+									{participant.age != null ? participant.age : '—'}
+								</Field>
+
 								<Field label='Distancia'>
-									{p.distance_km != null ? `${p.distance_km}K` : '—'}
-								</Field>
-								<Field label='Dorsal'>
-									{p.bib_number != null ? `#${p.bib_number}` : '—'}
-								</Field>
-								<Field label='Chip' mono>
-									{p.chip ?? '—'}
-								</Field>
-								<Field label='Categoría'>
-									{p.category && p.category.length > 0
-										? p.category[0].name
-										: p.category_id != null
-										? `ID ${p.category_id}`
+									{participant.distance_km != null
+										? `${participant.distance_km}K`
 										: '—'}
 								</Field>
+
+								<Field label='Dorsal'>
+									{participant.bib_number != null
+										? `#${participant.bib_number}`
+										: '—'}
+								</Field>
+
+								<Field label='Chip' mono>
+									{participant.chip ?? '—'}
+								</Field>
+
+								<Field label='Categoría'>{categoryName || '—'}</Field>
 							</div>
 
 							<div className='p-4 text-[11px] text-neutral-500'>
-								Acceso de solo lectura. Para altas/edición/crono, se utiliza la
-								sección de administración.
+								Acceso de solo lectura. Carga, edición y cronometraje están
+								reservados al administrador.
 							</div>
 						</div>
 					)}
