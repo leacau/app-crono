@@ -1,8 +1,6 @@
 'use client';
 
-import * as XLSX from 'xlsx';
-
-import { use, useEffect, useRef, useState } from 'react';
+import { use, useEffect, useState } from 'react';
 
 import { supabase } from '../../../lib/supabaseClient';
 import { useRouter } from 'next/navigation';
@@ -15,66 +13,82 @@ type Race = {
 	status: string;
 };
 
-type Participant = {
+type CategoryRow = {
 	id: number;
-	first_name: string;
-	last_name: string;
-	bib_number: string | null;
-	status: string;
+	name: string;
+	sex_allowed: 'ANY' | 'M' | 'F' | 'X';
+	age_min: number;
+	age_max: number;
 	distance_km: number;
-	age_snapshot: number;
-	sex: string;
-	category_name: string | null;
+	is_active: boolean;
 };
 
-export default function RacePage({
+export default function CategoriesPage({
 	params,
 }: {
 	params: Promise<{ raceId: string }>;
 }) {
-	const router = useRouter();
-
-	// Next 16: params es Promise -> usamos use() para desempaquetar
 	const { raceId: raceIdStr } = use(params);
 	const raceId = Number(raceIdStr);
+	const router = useRouter();
 
 	const [race, setRace] = useState<Race | null>(null);
-	const [participants, setParticipants] = useState<Participant[]>([]);
+	const [categories, setCategories] = useState<CategoryRow[]>([]);
 	const [loading, setLoading] = useState(true);
 
-	// alta manual (modal individual)
-	const [showModal, setShowModal] = useState(false);
-	const [saving, setSaving] = useState(false);
-	const [errMsg, setErrMsg] = useState('');
+	// ----- Modal: categoría individual -----
+	const [showNewModal, setShowNewModal] = useState(false);
+	const [savingCat, setSavingCat] = useState(false);
+	const [catErr, setCatErr] = useState('');
 
-	// campos para alta individual
-	const [pFirst, setPFirst] = useState('');
-	const [pLast, setPLast] = useState('');
-	const [pDni, setPDni] = useState('');
-	const [pSex, setPSex] = useState('M'); // default M
-	const [pBirth, setPBirth] = useState(''); // YYYY-MM-DD
-	const [pDist, setPDist] = useState(''); // km
-	const [pBib, setPBib] = useState(''); // dorsal (opcional)
+	const [catName, setCatName] = useState('');
+	const [catSex, setCatSex] = useState<'ANY' | 'M' | 'F' | 'X'>('ANY');
+	const [catDist, setCatDist] = useState('');
+	const [catMinAge, setCatMinAge] = useState('');
+	const [catMaxAge, setCatMaxAge] = useState('');
+	const [catActive, setCatActive] = useState(true);
 
-	// importación Excel
-	const [importing, setImporting] = useState(false);
-	const [importErr, setImportErr] = useState('');
-	const fileInputRef = useRef<HTMLInputElement | null>(null);
+	// ----- Modal: carga MASIVA -----
+	const [showBulkModal, setShowBulkModal] = useState(false);
+	const [bulkErr, setBulkErr] = useState('');
+	const [bulkSaving, setBulkSaving] = useState(false);
 
-	// =========================================
-	// LOAD DATA
-	// =========================================
+	const [bulkDistance, setBulkDistance] = useState('');
+	const [bulkSexMode, setBulkSexMode] = useState<'SPLIT' | 'ANY'>('SPLIT');
+	// SPLIT => separa Caballeros/Damas
+	// ANY   => mixto
+
+	const [bulkSexLabelStyle, setBulkSexLabelStyle] = useState<
+		'COMPLETO' | 'INICIAL'
+	>('COMPLETO');
+	// COMPLETO => "Caballeros", "Damas", "General"
+	// INICIAL  => "M", "F", "G"
+
+	const [bulkAgeBands, setBulkAgeBands] = useState('18-29;30-39;40-49');
+
+	// Plantilla del nombre con tokens personalizados
+	// [[distancia]], [[sexo]], [[sexo_inicial]], [[edad_min]], [[edad_max]]
+	const [bulkNamePattern, setBulkNamePattern] = useState(
+		'[[distancia]]K [[sexo]] DE [[edad_min]] A [[edad_max]]'
+	);
+
+	// ----- Modal: borrar todas -----
+	const [showDeleteAllModal, setShowDeleteAllModal] = useState(false);
+	const [deleteAllErr, setDeleteAllErr] = useState('');
+	const [deletingAll, setDeletingAll] = useState(false);
+
+	// -------------------------------------------------
+	// Cargar datos
+	// -------------------------------------------------
 
 	async function loadData() {
 		setLoading(true);
 
-		// 1. carrera
 		const { data: raceData, error: raceErr } = await supabase
 			.from('races')
 			.select('id, name, date, location, status')
 			.eq('id', raceId)
 			.single();
-
 		if (raceErr) {
 			console.error('Error cargando carrera:', raceErr);
 			setRace(null);
@@ -82,43 +96,18 @@ export default function RacePage({
 			setRace(raceData as Race);
 		}
 
-		// 2. participantes (con nombre de categoría)
-		const { data: partData, error: partErr } = await supabase
-			.from('participants')
-			.select(
-				`
-        id,
-        first_name,
-        last_name,
-        bib_number,
-        status,
-        distance_km,
-        age_snapshot,
-        sex,
-        category:category_id (
-          name
-        )
-      `
-			)
+		const { data: catData, error: catErr } = await supabase
+			.from('categories')
+			.select('id, name, sex_allowed, age_min, age_max, distance_km, is_active')
 			.eq('race_id', raceId)
-			.order('last_name', { ascending: true });
+			.order('distance_km', { ascending: true })
+			.order('age_min', { ascending: true });
 
-		if (partErr) {
-			console.error('Error cargando participantes:', partErr);
-			setParticipants([]);
+		if (catErr) {
+			console.error('Error cargando categorías:', catErr);
+			setCategories([]);
 		} else {
-			const mapped = (partData || []).map((row: any) => ({
-				id: row.id,
-				first_name: row.first_name,
-				last_name: row.last_name,
-				bib_number: row.bib_number,
-				status: row.status,
-				distance_km: row.distance_km,
-				age_snapshot: row.age_snapshot,
-				sex: row.sex,
-				category_name: row.category ? row.category.name : null,
-			}));
-			setParticipants(mapped);
+			setCategories(catData as CategoryRow[]);
 		}
 
 		setLoading(false);
@@ -129,381 +118,367 @@ export default function RacePage({
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [raceId]);
 
-	// =========================================
-	// HELPERS
-	// =========================================
-
-	// Edad en la fecha oficial de la carrera
-	function calcularEdadEnFecha(
-		nacimientoISO: string,
-		fechaCarreraISO: string
-	): number {
-		// nacimientoISO: "YYYY-MM-DD"
-		// fechaCarreraISO: "YYYY-MM-DD"
-		const nac = new Date(nacimientoISO + 'T00:00:00');
-		const ref = new Date(fechaCarreraISO + 'T00:00:00');
-		let edad = ref.getFullYear() - nac.getFullYear();
-		const m = ref.getMonth() - nac.getMonth();
-		if (m < 0 || (m === 0 && ref.getDate() < nac.getDate())) {
-			edad--;
-		}
-		return edad;
+	function parseNumberOrNull(v: string): number | null {
+		if (!v.trim()) return null;
+		const n = Number(v.replace(',', '.'));
+		if (!Number.isFinite(n)) return null;
+		return n;
 	}
 
-	// Le pasás sex, edad y distancia para esta carrera → devuelve category_id o null
-	async function obtenerCategoriaIdCorrecta({
-		sex,
-		edad,
-		distanceKm,
-	}: {
-		sex: string;
-		edad: number;
-		distanceKm: number;
-	}): Promise<number | null> {
-		const { data: cats, error: catErr } = await supabase
-			.from('categories')
-			.select('id, sex_allowed, age_min, age_max, distance_km, is_active')
-			.eq('race_id', raceId)
-			.eq('is_active', true);
+	// -------------------------------------------------
+	// Crear categoría individual
+	// -------------------------------------------------
 
-		if (catErr || !cats) {
-			console.error('Error obteniendo categorias:', catErr);
-			return null;
-		}
-
-		const posibles = cats.filter((c: any) => {
-			const sexoOk = c.sex_allowed === 'ANY' || c.sex_allowed === sex;
-			const edadOk = edad >= c.age_min && edad <= c.age_max;
-			const distOk = Number(distanceKm) === Number(c.distance_km);
-			return sexoOk && edadOk && distOk;
-		});
-
-		if (posibles.length === 0) {
-			return null;
-		}
-
-		// si hay más de una coincidencia, elegimos la más específica (menor rango etario)
-		posibles.sort((a: any, b: any) => {
-			const rangoA = a.age_max - a.age_min;
-			const rangoB = b.age_max - b.age_min;
-			return rangoA - rangoB;
-		});
-
-		return posibles[0].id;
-	}
-
-	// intenta parsear fechas que vengan como "YYYY-MM-DD" o "DD/MM/YYYY"
-	function normalizarFechaNacimiento(valor: any): string | null {
-		if (!valor) return null;
-
-		if (typeof valor === 'string') {
-			// caso 1: ya viene ISO "YYYY-MM-DD"
-			if (/^\d{4}-\d{2}-\d{2}$/.test(valor.trim())) {
-				return valor.trim();
-			}
-
-			// caso 2: "DD/MM/YYYY"
-			if (/^\d{2}\/\d{2}\/\d{4}$/.test(valor.trim())) {
-				const [dd, mm, yyyy] = valor.trim().split('/');
-				return `${yyyy}-${mm}-${dd}`; // lo devuelvo como YYYY-MM-DD
-			}
-		}
-
-		// caso 3: Excel puede darte fechas como número serial (ej: 45512)
-		// XLSX lo suele convertir a Date si usamos XLSX.utils.sheet_to_json con {raw: false}
-		// pero vamos a intentar fallback: si es número grande, lo interpretamos como serial
-		if (typeof valor === 'number') {
-			// Excel serial date (desde 1899-12-30)
-			const excelEpoch = new Date(Date.UTC(1899, 11, 30));
-			const ms = valor * 24 * 60 * 60 * 1000;
-			const d = new Date(excelEpoch.getTime() + ms);
-			// formateamos a YYYY-MM-DD
-			const yyyy = d.getUTCFullYear().toString().padStart(4, '0');
-			const mm = (d.getUTCMonth() + 1).toString().padStart(2, '0');
-			const dd = d.getUTCDate().toString().padStart(2, '0');
-			return `${yyyy}-${mm}-${dd}`;
-		}
-
-		// si no pudimos interpretar, devolvemos null
-		return null;
-	}
-
-	// =========================================
-	// ALTA INDIVIDUAL (modal)
-	// =========================================
-
-	async function handleAddParticipant() {
+	async function handleCreateCategory() {
 		if (!race) {
-			setErrMsg('No hay carrera cargada.');
+			setCatErr('No hay carrera cargada.');
 			return;
 		}
 
-		setSaving(true);
-		setErrMsg('');
+		setSavingCat(true);
+		setCatErr('');
+
+		if (!catName.trim()) {
+			setCatErr('Poné un nombre para la categoría.');
+			setSavingCat(false);
+			return;
+		}
+
+		const distNum = parseNumberOrNull(catDist);
+		if (distNum === null || distNum <= 0) {
+			setCatErr('Distancia inválida.');
+			setSavingCat(false);
+			return;
+		}
+
+		const minAgeNum = parseInt(catMinAge, 10);
+		const maxAgeNum = parseInt(catMaxAge, 10);
 
 		if (
-			!pFirst.trim() ||
-			!pLast.trim() ||
-			!pDni.trim() ||
-			!pBirth.trim() ||
-			!pDist.trim()
+			!Number.isFinite(minAgeNum) ||
+			!Number.isFinite(maxAgeNum) ||
+			minAgeNum < 0 ||
+			maxAgeNum < minAgeNum
 		) {
-			setErrMsg('Completá todos los datos obligatorios.');
-			setSaving(false);
+			setCatErr('Rango de edad inválido.');
+			setSavingCat(false);
 			return;
 		}
 
-		// 1. Calcular edad en el día de la carrera
-		const edad = calcularEdadEnFecha(pBirth, race.date);
-
-		// 2. Buscar la categoría correspondiente
-		const catId = await obtenerCategoriaIdCorrecta({
-			sex: pSex,
-			edad: edad,
-			distanceKm: Number(pDist),
-		});
-
-		// 3. Insertar en Supabase
-		const { error: insertErr } = await supabase.from('participants').insert([
+		const { error: insErr } = await supabase.from('categories').insert([
 			{
 				race_id: race.id,
-				first_name: pFirst.trim(),
-				last_name: pLast.trim(),
-				dni: pDni.trim(),
-				sex: pSex,
-				birth_date: pBirth,
-				age_snapshot: edad,
-				distance_km: Number(pDist),
-				category_id: catId,
-				bib_number: pBib.trim() || null,
-				status: 'registered',
+				name: catName.trim(),
+				sex_allowed: catSex,
+				age_min: minAgeNum,
+				age_max: maxAgeNum,
+				distance_km: distNum,
+				is_active: catActive,
 			},
 		]);
 
-		if (insertErr) {
-			console.error('Error insertando participante:', insertErr);
-			setErrMsg('No se pudo guardar el corredor.');
-			setSaving(false);
+		if (insErr) {
+			console.error('Error creando categoría:', insErr);
+			setCatErr('No se pudo crear la categoría.');
+			setSavingCat(false);
 			return;
 		}
 
 		// limpiar modal
-		setPFirst('');
-		setPLast('');
-		setPDni('');
-		setPSex('M');
-		setPBirth('');
-		setPDist('');
-		setPBib('');
-		setShowModal(false);
-		setSaving(false);
+		setCatName('');
+		setCatSex('ANY');
+		setCatDist('');
+		setCatMinAge('');
+		setCatMaxAge('');
+		setCatActive(true);
+		setShowNewModal(false);
+		setSavingCat(false);
 
-		// recargar lista
 		loadData();
 	}
 
-	// =========================================
-	// IMPORTACIÓN DESDE EXCEL
-	// =========================================
+	// -------------------------------------------------
+	// Helpers para el nombre masivo
+	// -------------------------------------------------
 
-	async function procesarExcel(file: File) {
-		if (!race) return;
+	function buildSexLabelFull(sexAllowed: 'M' | 'F' | 'ANY'): string {
+		if (sexAllowed === 'M') return 'Caballeros';
+		if (sexAllowed === 'F') return 'Damas';
+		return 'General';
+	}
 
-		setImportErr('');
-		setImporting(true);
+	function buildSexLabelInitial(sexAllowed: 'M' | 'F' | 'ANY'): string {
+		if (sexAllowed === 'M') return 'M';
+		if (sexAllowed === 'F') return 'F';
+		return 'G';
+	}
 
-		try {
-			// Leemos el archivo binario
-			const buffer = await file.arrayBuffer();
-			const wb = XLSX.read(buffer, { type: 'array' });
+	function applyPattern(
+		pattern: string,
+		data: {
+			distancia: number;
+			sexoFull: string;
+			sexoInicial: string;
+			edadMin: number;
+			edadMax: number;
+		}
+	): string {
+		let name = pattern;
+		name = name.replaceAll('[[distancia]]', String(data.distancia));
+		name = name.replaceAll('[[sexo]]', data.sexoFull);
+		name = name.replaceAll('[[sexo_inicial]]', data.sexoInicial);
+		name = name.replaceAll('[[edad_min]]', String(data.edadMin));
+		name = name.replaceAll('[[edad_max]]', String(data.edadMax));
+		// limpieza: evitar dobles espacios
+		return name.trim().replace(/\s+/g, ' ');
+	}
 
-			// Tomamos la primera hoja
-			const sheetName = wb.SheetNames[0];
-			const sheet = wb.Sheets[sheetName];
+	// -------------------------------------------------
+	// Crear categorías MASIVAS
+	// -------------------------------------------------
 
-			// Convertimos la hoja en array de objetos
-			// header: lee la primera fila como encabezados
-			const rows: any[] = XLSX.utils.sheet_to_json(sheet, { header: 1 });
-			// rows es una matriz tipo [ [header1, header2...], [valRow2Col1, ...], ...]
+	async function handleBulkCreate() {
+		if (!race) {
+			setBulkErr('No hay carrera cargada.');
+			return;
+		}
 
-			if (rows.length < 2) {
-				throw new Error(
-					'El archivo no tiene datos (necesita encabezados + filas).'
-				);
-			}
+		setBulkSaving(true);
+		setBulkErr('');
 
-			// construimos un mapa de nombreDeColumna -> índice de columna
-			const headers = rows[0].map((h: any) =>
-				('' + h).trim().toLowerCase()
-			) as string[];
+		const distNum = parseNumberOrNull(bulkDistance);
+		if (distNum === null || distNum <= 0) {
+			setBulkErr('Distancia inválida.');
+			setBulkSaving(false);
+			return;
+		}
 
-			function idx(colName: string): number {
-				// buscamos colName en headers
-				// aceptamos alias razonables
-				const aliases: Record<string, string[]> = {
-					first_name: ['first_name', 'nombre', 'name', 'nombres'],
-					last_name: ['last_name', 'apellido', 'apellidos', 'surname'],
-					dni: ['dni', 'documento', 'doc'],
-					sex: ['sex', 'sexo', 'gender', 'genero', 'género'],
-					birth_date: ['birth_date', 'fecha_nacimiento', 'nacimiento', 'dob'],
-					distance_km: ['distance_km', 'distancia', 'km', 'distance'],
-					bib_number: ['bib_number', 'dorsal', 'pechera', 'numero', 'nro'],
-				};
-
-				for (const want of aliases[colName]) {
-					const i = headers.findIndex((h) => h === want.toLowerCase());
-					if (i !== -1) return i;
-				}
-				return -1;
-			}
-
-			const colFirst = idx('first_name');
-			const colLast = idx('last_name');
-			const colDni = idx('dni');
-			const colSex = idx('sex');
-			const colBirth = idx('birth_date');
-			const colDist = idx('distance_km');
-			const colBib = idx('bib_number'); // opcional
-
-			// Validamos que al menos lo esencial exista
-			if (
-				colFirst === -1 ||
-				colLast === -1 ||
-				colDni === -1 ||
-				colSex === -1 ||
-				colBirth === -1 ||
-				colDist === -1
-			) {
-				throw new Error(
-					'Faltan columnas obligatorias. Necesitamos: nombre, apellido, dni, sexo, fecha_nacimiento, distancia_km.'
-				);
-			}
-
-			// Ahora recorremos cada fila de datos (arranca en 1 porque 0 son headers)
-			const inserts: any[] = [];
-
-			for (let r = 1; r < rows.length; r++) {
-				const row = rows[r];
-
-				// si la fila está vacía, la salteamos
+		// Parseo bandas ej "18-29;30-39;40-49"
+		const bandas = bulkAgeBands
+			.split(';')
+			.map((frag) => frag.trim())
+			.filter((frag) => frag.length > 0)
+			.map((frag) => {
+				const m = frag.match(/^(\d+)\s*-\s*(\d+)$/);
+				if (!m) return null;
+				const minA = parseInt(m[1], 10);
+				const maxA = parseInt(m[2], 10);
 				if (
-					!row ||
-					row.every(
-						(cell: any) => cell === undefined || cell === null || cell === ''
-					)
+					!Number.isFinite(minA) ||
+					!Number.isFinite(maxA) ||
+					minA < 0 ||
+					maxA < minA
 				) {
-					continue;
+					return null;
 				}
+				return { minA, maxA };
+			});
 
-				const rawFirst = row[colFirst];
-				const rawLast = row[colLast];
-				const rawDni = row[colDni];
-				const rawSex = row[colSex];
-				const rawBirth = row[colBirth];
-				const rawDist = row[colDist];
-				const rawBib = colBib !== -1 ? row[colBib] : null;
+		if (bandas.length === 0 || bandas.some((b) => b === null)) {
+			setBulkErr(
+				'Formato de bandas inválido. Ejemplo válido: 18-29;30-39;40-49'
+			);
+			setBulkSaving(false);
+			return;
+		}
 
-				if (
-					!rawFirst ||
-					!rawLast ||
-					!rawDni ||
-					!rawSex ||
-					!rawBirth ||
-					!rawDist
-				) {
-					// faltan datos clave -> lo salteamos silencioso
-					console.warn('Fila incompleta, se omite:', row);
-					continue;
-				}
+		const inserts: any[] = [];
 
-				// normalizamos fecha de nacimiento
-				const birthISO = normalizarFechaNacimiento(rawBirth);
-				if (!birthISO) {
-					console.warn('No pude interpretar fecha nacimiento en fila:', row);
-					continue;
-				}
+		for (const b of bandas) {
+			if (!b) continue;
+			const { minA, maxA } = b;
 
-				// sexo en mayúscula tipo 'M'/'F'/'X'
-				const sexNorm = ('' + rawSex).trim().toUpperCase();
-				// distancia a número
-				const distNum = Number(rawDist);
+			if (bulkSexMode === 'SPLIT') {
+				// masculino
+				const sexM: 'M' = 'M';
+				const sexoFullM =
+					bulkSexLabelStyle === 'COMPLETO'
+						? buildSexLabelFull(sexM)
+						: buildSexLabelInitial(sexM);
 
-				if (!Number.isFinite(distNum) || distNum <= 0) {
-					console.warn('Distancia inválida en fila:', row);
-					continue;
-				}
-
-				// edad snapshot según fecha de la carrera
-				const edadSnap = calcularEdadEnFecha(birthISO, race.date);
-
-				// buscamos categoría que encaje
-				const catId = await obtenerCategoriaIdCorrecta({
-					sex: sexNorm,
-					edad: edadSnap,
-					distanceKm: distNum,
+				const nameM = applyPattern(bulkNamePattern, {
+					distancia: distNum,
+					sexoFull: sexoFullM,
+					sexoInicial: buildSexLabelInitial(sexM),
+					edadMin: minA,
+					edadMax: maxA,
 				});
 
 				inserts.push({
 					race_id: race.id,
-					first_name: ('' + rawFirst).trim(),
-					last_name: ('' + rawLast).trim(),
-					dni: ('' + rawDni).trim(),
-					sex: sexNorm,
-					birth_date: birthISO,
-					age_snapshot: edadSnap,
+					name: nameM,
+					sex_allowed: 'M',
+					age_min: minA,
+					age_max: maxA,
 					distance_km: distNum,
-					category_id: catId,
-					bib_number: rawBib ? ('' + rawBib).trim() : null,
-					status: 'registered',
+					is_active: true,
+				});
+
+				// femenino
+				const sexF: 'F' = 'F';
+				const sexoFullF =
+					bulkSexLabelStyle === 'COMPLETO'
+						? buildSexLabelFull(sexF)
+						: buildSexLabelInitial(sexF);
+
+				const nameF = applyPattern(bulkNamePattern, {
+					distancia: distNum,
+					sexoFull: sexoFullF,
+					sexoInicial: buildSexLabelInitial(sexF),
+					edadMin: minA,
+					edadMax: maxA,
+				});
+
+				inserts.push({
+					race_id: race.id,
+					name: nameF,
+					sex_allowed: 'F',
+					age_min: minA,
+					age_max: maxA,
+					distance_km: distNum,
+					is_active: true,
+				});
+			} else {
+				// mixto / ANY
+				const sexAny: 'ANY' = 'ANY';
+				const sexoFullAny =
+					bulkSexLabelStyle === 'COMPLETO'
+						? buildSexLabelFull(sexAny)
+						: buildSexLabelInitial(sexAny);
+
+				const nameAny = applyPattern(bulkNamePattern, {
+					distancia: distNum,
+					sexoFull: sexoFullAny,
+					sexoInicial: buildSexLabelInitial(sexAny),
+					edadMin: minA,
+					edadMax: maxA,
+				});
+
+				inserts.push({
+					race_id: race.id,
+					name: nameAny,
+					sex_allowed: 'ANY',
+					age_min: minA,
+					age_max: maxA,
+					distance_km: distNum,
+					is_active: true,
 				});
 			}
-
-			if (inserts.length === 0) {
-				throw new Error('No se pudo importar ninguna fila válida.');
-			}
-
-			// hacemos insert masivo en Supabase
-			const { error: batchErr } = await supabase
-				.from('participants')
-				.insert(inserts);
-
-			if (batchErr) {
-				console.error('Error insertando batch:', batchErr);
-				throw new Error('Supabase rechazó la importación masiva.');
-			}
-
-			// listo: refrescamos
-			await loadData();
-		} catch (err: any) {
-			console.error('Error en importación:', err);
-			setImportErr(err.message || 'Error al importar archivo.');
-		} finally {
-			setImporting(false);
 		}
-	}
 
-	function handleClickImportar() {
-		// abre el selector de archivo
-		if (fileInputRef.current) {
-			fileInputRef.current.value = ''; // reseteamos para poder reimportar el mismo archivo
-			fileInputRef.current.click();
+		if (inserts.length === 0) {
+			setBulkErr('No se generaron categorías.');
+			setBulkSaving(false);
+			return;
 		}
+
+		const { error: bulkErrInsert } = await supabase
+			.from('categories')
+			.insert(inserts);
+
+		if (bulkErrInsert) {
+			console.error('Error creando categorías masivas:', bulkErrInsert);
+			setBulkErr('No se pudieron crear las categorías.');
+			setBulkSaving(false);
+			return;
+		}
+
+		// reset modal masivo
+		setBulkDistance('');
+		setBulkSexMode('SPLIT');
+		setBulkSexLabelStyle('COMPLETO');
+		setBulkAgeBands('18-29;30-39;40-49');
+		setBulkNamePattern(
+			'[[distancia]]K [[sexo]] DE [[edad_min]] A [[edad_max]]'
+		);
+
+		setShowBulkModal(false);
+		setBulkSaving(false);
+
+		loadData();
 	}
 
-	async function handleFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
-		const file = e.target.files?.[0];
-		if (!file) return;
-		await procesarExcel(file);
+	// -------------------------------------------------
+	// Activar / Desactivar categoría existente
+	// -------------------------------------------------
+
+	async function handleToggleActive(catId: number, current: boolean) {
+		const { error: upErr } = await supabase
+			.from('categories')
+			.update({ is_active: !current })
+			.eq('id', catId)
+			.eq('race_id', raceId);
+
+		if (upErr) {
+			console.error('Error actualizando categoría:', upErr);
+		}
+		loadData();
 	}
 
-	// =========================================
-	// RENDER
-	// =========================================
+	// -------------------------------------------------
+	// Eliminar UNA categoría
+	// -------------------------------------------------
+
+	async function handleDeleteCategory(catId: number, catNameConfirm: string) {
+		// pequeña confirmación runtime
+		const ok = window.confirm(
+			`Vas a eliminar la categoría "${catNameConfirm}". Esto no se puede deshacer.\n` +
+				`Los participantes que estaban asignados a esta categoría quedarán sin categoría.\n\n¿Continuar?`
+		);
+		if (!ok) return;
+
+		const { error: delErr } = await supabase
+			.from('categories')
+			.delete()
+			.eq('id', catId)
+			.eq('race_id', raceId);
+
+		if (delErr) {
+			console.error('Error eliminando categoría:', delErr);
+			// Podríamos mostrar un alert simple
+			alert('No se pudo eliminar la categoría en Supabase.');
+			return;
+		}
+
+		loadData();
+	}
+
+	// -------------------------------------------------
+	// Eliminar TODAS las categorías de la carrera
+	// -------------------------------------------------
+
+	async function confirmDeleteAllCategories() {
+		if (!race) return;
+		setDeletingAll(true);
+		setDeleteAllErr('');
+
+		// delete all by race_id
+		const { error: delAllErr } = await supabase
+			.from('categories')
+			.delete()
+			.eq('race_id', raceId);
+
+		if (delAllErr) {
+			console.error('Error eliminando TODAS las categorías:', delAllErr);
+			setDeleteAllErr('No se pudieron eliminar todas las categorías.');
+			setDeletingAll(false);
+			return;
+		}
+
+		setDeletingAll(false);
+		setShowDeleteAllModal(false);
+
+		loadData();
+	}
+
+	// -------------------------------------------------
+	// Render
+	// -------------------------------------------------
 
 	if (loading && !race) {
 		return (
 			<main className='min-h-screen bg-neutral-950 text-white p-4'>
-				<div className='text-neutral-400'>Cargando carrera...</div>
+				<div className='text-neutral-400 text-sm'>Cargando...</div>
 			</main>
 		);
 	}
@@ -524,245 +499,432 @@ export default function RacePage({
 
 	return (
 		<main className='min-h-screen bg-neutral-950 text-white p-4 pb-24'>
-			{/* HEADER CARRERA */}
+			{/* HEADER */}
 			<div className='flex flex-col gap-1 mb-4'>
-				<div className='text-sm text-neutral-400 flex items-center gap-2'>
+				<div className='text-sm text-neutral-400 flex items-center gap-2 flex-wrap'>
 					<button
 						className='underline text-neutral-300'
-						onClick={() => router.push('/')}
+						onClick={() => router.push(`/race/${raceId}`)}
 					>
-						← Volver
+						← Volver a la carrera
 					</button>
 					<span className='text-neutral-600'>/</span>
-					<span>{race.id}</span>
+					<span>Categorías</span>
 				</div>
 
-				<h1 className='text-2xl font-bold'>{race.name}</h1>
+				<div className='flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3'>
+					<div>
+						<h1 className='text-2xl font-bold leading-tight break-words'>
+							Categorías · {race.name}
+						</h1>
+						<div className='text-sm text-neutral-400'>
+							{race.date} · {race.location || 'Sin ubicación'}
+						</div>
+					</div>
 
-				<div className='text-sm text-neutral-400'>
-					{race.date} · {race.location || 'Sin ubicación'}
-				</div>
+					<div className='flex flex-col sm:flex-row gap-2 w-full sm:w-auto'>
+						<button
+							className='bg-emerald-600 text-white text-sm font-semibold px-4 py-2 rounded-lg active:scale-95 w-full sm:w-auto'
+							onClick={() => {
+								setCatErr('');
+								setShowNewModal(true);
+							}}
+						>
+							+ Categoría individual
+						</button>
 
-				<div className='text-xs mt-1 inline-block px-2 py-1 rounded bg-neutral-800 text-neutral-300 border border-neutral-600 w-fit'>
-					{race.status}
+						<button
+							className='bg-blue-600 text-white text-sm font-semibold px-4 py-2 rounded-lg active:scale-95 w-full sm:w-auto'
+							onClick={() => {
+								setBulkErr('');
+								setShowBulkModal(true);
+							}}
+						>
+							+ Carga masiva
+						</button>
+
+						<button
+							className='bg-red-700 text-white text-sm font-semibold px-4 py-2 rounded-lg active:scale-95 w-full sm:w-auto border border-red-500'
+							onClick={() => {
+								setDeleteAllErr('');
+								setShowDeleteAllModal(true);
+							}}
+						>
+							Borrar TODAS
+						</button>
+					</div>
 				</div>
 			</div>
 
-			{/* ACCIONES DE CARRERA */}
-			<section className='mb-6 flex flex-col gap-3'>
-				<div className='flex flex-wrap gap-3'>
-					{/* Alta individual */}
-					<button
-						className='flex-1 bg-emerald-600 text-white text-sm font-semibold px-3 py-3 rounded-lg active:scale-95 text-center'
-						onClick={() => {
-							setShowModal(true);
-							setErrMsg('');
-						}}
-					>
-						+ Participante
-					</button>
-
-					{/* Cronómetro */}
-					<button
-						className='flex-1 bg-blue-600 text-white text-sm font-semibold px-3 py-3 rounded-lg active:scale-95 text-center'
-						onClick={() => {
-							router.push(`/race/${raceId}/timer`);
-						}}
-					>
-						Cronómetro
-					</button>
-
-					{/* Resultados */}
-					<button
-						className='flex-1 bg-purple-600 text-white text-sm font-semibold px-3 py-3 rounded-lg active:scale-95 text-center'
-						onClick={() => {
-							router.push(`/race/${raceId}/results`);
-						}}
-					>
-						Resultados
-					</button>
+			{/* LISTA DE CATEGORÍAS */}
+			{categories.length === 0 ? (
+				<div className='text-neutral-400 text-sm'>
+					No hay categorías todavía.
 				</div>
-
-				{/* Importar Excel */}
-				<div className='flex flex-col gap-2 bg-neutral-900 border border-neutral-700 rounded-xl p-3'>
-					<div className='flex items-center justify-between'>
-						<div className='text-sm font-semibold text-white flex flex-col'>
-							<span>Importar planilla Excel</span>
-							<span className='text-[11px] text-neutral-400 font-normal'>
-								Columnas mínimas: nombre, apellido, dni, sexo, fecha_nacimiento,
-								distancia_km, (dorsal opcional)
-							</span>
-						</div>
-
-						<button
-							className='bg-neutral-800 text-white text-xs font-semibold px-3 py-2 rounded-lg border border-neutral-600 active:scale-95 disabled:opacity-50 disabled:active:scale-100'
-							disabled={importing}
-							onClick={handleClickImportar}
+			) : (
+				<ul className='flex flex-col gap-2'>
+					{categories.map((c) => (
+						<li
+							key={c.id}
+							className='border border-neutral-700 bg-neutral-900 rounded-xl p-3 text-sm flex flex-col gap-2'
 						>
-							{importing ? 'Importando...' : 'Subir .xlsx'}
-						</button>
-
-						{/* input oculto real */}
-						<input
-							ref={fileInputRef}
-							type='file'
-							className='hidden'
-							accept='.xlsx,.xls'
-							onChange={handleFileSelected}
-						/>
-					</div>
-
-					{importErr && <div className='text-red-400 text-xs'>{importErr}</div>}
-				</div>
-
-				{/* Resumen participantes */}
-				<div className='text-lg font-semibold mt-2'>
-					Participantes ({participants.length})
-				</div>
-
-				{participants.length === 0 ? (
-					<div className='text-neutral-400 text-sm'>
-						No hay participantes todavía.
-					</div>
-				) : (
-					<ul className='flex flex-col gap-2'>
-						{participants.map((p) => (
-							<li
-								key={p.id}
-								className='rounded-lg border border-neutral-700 bg-neutral-900 p-3 text-sm flex flex-col'
-							>
-								<div className='flex justify-between'>
-									<div className='font-semibold'>
-										{p.last_name.toUpperCase()}, {p.first_name}
+							<div className='flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2'>
+								<div className='flex flex-col flex-1 min-w-0'>
+									<div className='font-semibold text-white leading-tight break-words'>
+										{c.name}
 									</div>
-									<div className='text-neutral-400'>
-										#{p.bib_number || 's/d'}
+									<div className='text-[11px] text-neutral-400 flex flex-wrap gap-2 leading-tight mt-1'>
+										<span>
+											Sexo:&nbsp;
+											{c.sex_allowed === 'ANY' ? 'Cualquiera' : c.sex_allowed}
+										</span>
+										<span>
+											Edad:&nbsp;{c.age_min} - {c.age_max}
+										</span>
+										<span>Dist:&nbsp;{c.distance_km}K</span>
 									</div>
 								</div>
 
-								<div className='text-neutral-400 flex flex-wrap gap-2 text-xs mt-1'>
-									<span>{p.sex}</span>
-									<span>{p.age_snapshot} años</span>
-									<span>{p.distance_km}K</span>
-									<span>{p.category_name || 'Sin categoría'}</span>
-									<span>{p.status}</span>
-								</div>
-							</li>
-						))}
-					</ul>
-				)}
-			</section>
+								<div className='flex flex-row flex-wrap items-center gap-2 shrink-0'>
+									<span
+										className={
+											'text-[11px] px-2 py-1 rounded border ' +
+											(c.is_active
+												? 'bg-emerald-700/20 border-emerald-600 text-emerald-400'
+												: 'bg-neutral-800 border-neutral-600 text-neutral-400')
+										}
+									>
+										{c.is_active ? 'Activa' : 'Inactiva'}
+									</span>
 
-			{/* MODAL NUEVO PARTICIPANTE (ALTA INDIVIDUAL) */}
-			{showModal && (
-				<div className='fixed inset-0 flex items-center justify-center bg-black/70 p-4 z-50'>
+									<button
+										className='text-[11px] bg-neutral-800 border border-neutral-600 rounded px-2 py-1 text-neutral-200 active:scale-95'
+										onClick={() => handleToggleActive(c.id, c.is_active)}
+									>
+										{c.is_active ? 'Desactivar' : 'Activar'}
+									</button>
+
+									<button
+										className='text-[11px] bg-red-800 border border-red-600 rounded px-2 py-1 text-white active:scale-95'
+										onClick={() => handleDeleteCategory(c.id, c.name)}
+									>
+										Eliminar
+									</button>
+								</div>
+							</div>
+						</li>
+					))}
+				</ul>
+			)}
+
+			{/* MODAL NUEVA CATEGORÍA (individual) */}
+			{showNewModal && (
+				<div className='fixed inset-0 flex items-center justify-center bg-black/70 p-4 z-[60]'>
 					<div className='w-full max-w-sm bg-neutral-900 border border-neutral-700 rounded-xl p-4 flex flex-col gap-4'>
 						<div className='flex items-start justify-between'>
-							<div className='text-lg font-semibold'>Nuevo participante</div>
+							<div className='text-lg font-semibold text-white'>
+								Nueva categoría
+							</div>
 							<button
 								className='text-neutral-400 text-sm'
-								disabled={saving}
+								disabled={savingCat}
 								onClick={() => {
-									setShowModal(false);
-									setErrMsg('');
+									if (!savingCat) {
+										setShowNewModal(false);
+										setCatErr('');
+									}
 								}}
 							>
 								✕
 							</button>
 						</div>
 
-						<div className='text-xs text-neutral-400'>
-							Carrera #{race.id} · {race.name}
+						<div className='text-xs text-neutral-400 leading-snug'>
+							Definí las reglas de inclusión. Cada corredor que cumpla (sexo /
+							edad / distancia) cae acá automáticamente.
 						</div>
 
-						{errMsg && <div className='text-red-400 text-sm'>{errMsg}</div>}
+						{catErr && <div className='text-red-400 text-sm'>{catErr}</div>}
 
+						{/* Nombre */}
 						<label className='text-sm flex flex-col gap-1'>
-							<span>Nombre</span>
+							<span>Nombre de la categoría</span>
 							<input
 								className='w-full rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-base'
-								value={pFirst}
-								onChange={(e) => setPFirst(e.target.value)}
-								disabled={saving}
-								placeholder='Juan'
+								value={catName}
+								onChange={(e) => setCatName(e.target.value)}
+								disabled={savingCat}
+								placeholder='Ej: "10K Caballeros DE 40 A 49"'
 							/>
 						</label>
 
+						{/* Sexo */}
 						<label className='text-sm flex flex-col gap-1'>
-							<span>Apellido</span>
-							<input
-								className='w-full rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-base'
-								value={pLast}
-								onChange={(e) => setPLast(e.target.value)}
-								disabled={saving}
-								placeholder='Pérez'
-							/>
-						</label>
-
-						<label className='text-sm flex flex-col gap-1'>
-							<span>DNI</span>
-							<input
-								className='w-full rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-base'
-								value={pDni}
-								onChange={(e) => setPDni(e.target.value)}
-								disabled={saving}
-								placeholder='12345678'
-							/>
-						</label>
-
-						<label className='text-sm flex flex-col gap-1'>
-							<span>Sexo</span>
+							<span>Sexo permitido</span>
 							<select
 								className='w-full rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-base'
-								value={PSex}
-								onChange={(e) => setPSex(e.target.value)}
-								disabled={saving}
+								value={catSex}
+								onChange={(e) =>
+									setCatSex(e.target.value as 'ANY' | 'M' | 'F' | 'X')
+								}
+								disabled={savingCat}
 							>
+								<option value='ANY'>Cualquiera</option>
 								<option value='M'>M</option>
 								<option value='F'>F</option>
 								<option value='X'>X</option>
 							</select>
 						</label>
 
-						<label className='text-sm flex flex-col gap-1'>
-							<span>Fecha de nacimiento</span>
-							<input
-								type='date'
-								className='w-full rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-base'
-								value={pBirth}
-								onChange={(e) => setPBirth(e.target.value)}
-								disabled={saving}
-							/>
-						</label>
-
+						{/* Distancia */}
 						<label className='text-sm flex flex-col gap-1'>
 							<span>Distancia (km)</span>
 							<input
 								className='w-full rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-base'
-								value={pDist}
-								onChange={(e) => setPDist(e.target.value)}
-								disabled={saving}
+								value={catDist}
+								onChange={(e) => setCatDist(e.target.value)}
+								disabled={savingCat}
 								placeholder='10'
 							/>
 						</label>
 
-						<label className='text-sm flex flex-col gap-1'>
-							<span>Dorsal (opcional)</span>
+						{/* Rango de edad */}
+						<div className='grid grid-cols-2 gap-3'>
+							<label className='text-sm flex flex-col gap-1'>
+								<span>Edad mín.</span>
+								<input
+									className='w-full rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-base'
+									value={catMinAge}
+									onChange={(e) => setCatMinAge(e.target.value)}
+									disabled={savingCat}
+									placeholder='40'
+								/>
+							</label>
+
+							<label className='text-sm flex flex-col gap-1'>
+								<span>Edad máx.</span>
+								<input
+									className='w-full rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-base'
+									value={catMaxAge}
+									onChange={(e) => setCatMaxAge(e.target.value)}
+									disabled={savingCat}
+									placeholder='49'
+								/>
+							</label>
+						</div>
+
+						{/* Activo */}
+						<label className='text-sm flex items-center gap-2'>
 							<input
-								className='w-full rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-base'
-								value={pBib}
-								onChange={(e) => setPBib(e.target.value)}
-								disabled={saving}
-								placeholder='154'
+								type='checkbox'
+								className='w-4 h-4 accent-emerald-600'
+								checked={catActive}
+								onChange={(e) => setCatActive(e.target.checked)}
+								disabled={savingCat}
 							/>
+							<span className='text-neutral-200 text-xs'>Categoría activa</span>
 						</label>
 
 						<button
 							className='w-full bg-emerald-600 text-white font-semibold text-base px-4 py-3 rounded-lg active:scale-95 disabled:opacity-50 disabled:active:scale-100'
-							disabled={saving}
-							onClick={handleAddParticipant}
+							disabled={savingCat}
+							onClick={handleCreateCategory}
 						>
-							{saving ? 'Guardando...' : 'Guardar participante'}
+							{savingCat ? 'Guardando...' : 'Crear categoría'}
+						</button>
+					</div>
+				</div>
+			)}
+
+			{/* MODAL CARGA MASIVA */}
+			{showBulkModal && (
+				<div className='fixed inset-0 flex items-center justify-center bg-black/70 p-4 z-[70]'>
+					<div className='w-full max-w-sm bg-neutral-900 border border-neutral-700 rounded-xl p-4 flex flex-col gap-4'>
+						<div className='flex items-start justify-between'>
+							<div className='text-lg font-semibold text-white'>
+								Carga masiva de categorías
+							</div>
+							<button
+								className='text-neutral-400 text-sm'
+								disabled={bulkSaving}
+								onClick={() => {
+									if (!bulkSaving) {
+										setShowBulkModal(false);
+										setBulkErr('');
+									}
+								}}
+							>
+								✕
+							</button>
+						</div>
+
+						<div className='text-xs text-neutral-400 leading-snug space-y-2'>
+							<div>
+								Definí distancia, cortes de edad y cómo querés nombrar cada
+								categoría. Se van a generar todas juntas.
+							</div>
+							<div className='text-[10px] text-neutral-500 leading-tight'>
+								Bandas válidas:{' '}
+								<span className='font-mono'>18-29;30-39;40-49</span>
+							</div>
+							<div className='text-[10px] text-neutral-500 leading-tight'>
+								Tokens nombre:
+								<br />
+								<span className='font-mono text-[10px] text-neutral-300'>
+									[[distancia]] [[sexo]] [[sexo_inicial]] [[edad_min]]
+									[[edad_max]]
+								</span>
+							</div>
+							<div className='text-[10px] text-neutral-400 leading-tight'>
+								Ejemplo:{' '}
+								<span className='font-mono text-[10px] text-neutral-300'>
+									[[distancia]]K [[sexo]] DE [[edad_min]] A [[edad_max]]
+								</span>
+							</div>
+						</div>
+
+						{bulkErr && <div className='text-red-400 text-sm'>{bulkErr}</div>}
+
+						{/* Distancia */}
+						<label className='text-sm flex flex-col gap-1'>
+							<span>Distancia (km)</span>
+							<input
+								className='w-full rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-base'
+								value={bulkDistance}
+								onChange={(e) => setBulkDistance(e.target.value)}
+								disabled={bulkSaving}
+								placeholder='10'
+							/>
+						</label>
+
+						{/* Modo de sexo SPLIT / ANY */}
+						<label className='text-sm flex flex-col gap-1'>
+							<span>Sexo / división</span>
+							<select
+								className='w-full rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-base'
+								value={bulkSexMode}
+								onChange={(e) =>
+									setBulkSexMode(e.target.value as 'SPLIT' | 'ANY')
+								}
+								disabled={bulkSaving}
+							>
+								<option value='SPLIT'>Separar Caballeros/Damas</option>
+								<option value='ANY'>Mixto (General)</option>
+							</select>
+							<span className='text-[10px] text-neutral-500 leading-tight'>
+								SPLIT → crea M y F. ANY → crea solo una categoría mixta.
+							</span>
+						</label>
+
+						{/* Estilo etiqueta sexo */}
+						<label className='text-sm flex flex-col gap-1'>
+							<span>Formato de sexo en el nombre</span>
+							<select
+								className='w-full rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-base'
+								value={bulkSexLabelStyle}
+								onChange={(e) =>
+									setBulkSexLabelStyle(e.target.value as 'COMPLETO' | 'INICIAL')
+								}
+								disabled={bulkSaving}
+							>
+								<option value='COMPLETO'>
+									Nombre completo (Caballeros / Damas / General)
+								</option>
+								<option value='INICIAL'>Inicial (M / F / G)</option>
+							</select>
+							<span className='text-[10px] text-neutral-500 leading-tight'>
+								Esto impacta en [[sexo]]. Siempre podés usar [[sexo_inicial]]
+								directo si querés inicial fija.
+							</span>
+						</label>
+
+						{/* Bandas de edad */}
+						<label className='text-sm flex flex-col gap-1'>
+							<span>Bandas de edad</span>
+							<textarea
+								className='w-full rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-sm min-h-[70px]'
+								value={bulkAgeBands}
+								onChange={(e) => setBulkAgeBands(e.target.value)}
+								disabled={bulkSaving}
+							/>
+							<span className='text-[10px] text-neutral-500 leading-tight'>
+								Formato: "18-29;30-39;40-49"
+							</span>
+						</label>
+
+						{/* Plantilla de nombre */}
+						<label className='text-sm flex flex-col gap-1'>
+							<span>Plantilla de nombre</span>
+							<textarea
+								className='w-full rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-sm min-h-[60px]'
+								value={bulkNamePattern}
+								onChange={(e) => setBulkNamePattern(e.target.value)}
+								disabled={bulkSaving}
+							/>
+							<span className='text-[10px] text-neutral-500 leading-tight'>
+								Ejemplo recomendado:
+								<br />
+								<span className='font-mono text-[10px] text-neutral-300'>
+									[[distancia]]K [[sexo]] DE [[edad_min]] A [[edad_max]]
+								</span>
+							</span>
+						</label>
+
+						<button
+							className='w-full bg-blue-600 text-white font-semibold text-base px-4 py-3 rounded-lg active:scale-95 disabled:opacity-50 disabled:active:scale-100'
+							disabled={bulkSaving}
+							onClick={handleBulkCreate}
+						>
+							{bulkSaving ? 'Creando...' : 'Crear categorías masivas'}
+						</button>
+					</div>
+				</div>
+			)}
+
+			{/* MODAL BORRAR TODAS LAS CATEGORÍAS */}
+			{showDeleteAllModal && (
+				<div className='fixed inset-0 flex items-center justify-center bg-black/70 p-4 z-[80]'>
+					<div className='w-full max-w-sm bg-neutral-900 border border-red-700 rounded-xl p-4 flex flex-col gap-4'>
+						<div className='flex items-start justify-between'>
+							<div className='text-lg font-semibold text-red-400'>
+								Borrar TODAS las categorías
+							</div>
+							<button
+								className='text-neutral-400 text-sm'
+								disabled={deletingAll}
+								onClick={() => {
+									if (!deletingAll) {
+										setShowDeleteAllModal(false);
+										setDeleteAllErr('');
+									}
+								}}
+							>
+								✕
+							</button>
+						</div>
+
+						<div className='text-xs text-neutral-300 leading-snug space-y-2'>
+							<p>Esto va a ELIMINAR TODAS las categorías de esta carrera.</p>
+							<p className='text-red-400 font-semibold'>
+								Esta acción es destructiva. No la vas a poder deshacer.
+							</p>
+							<p className='text-[11px] text-neutral-400 leading-tight'>
+								Los participantes quedan sin categoría hasta que vuelvas a
+								generar categorías nuevas y presiones "Recalcular categorías" en
+								la pantalla principal de la carrera.
+							</p>
+						</div>
+
+						{deleteAllErr && (
+							<div className='text-red-400 text-sm'>{deleteAllErr}</div>
+						)}
+
+						<button
+							className='w-full bg-red-700 border border-red-500 text-white font-semibold text-base px-4 py-3 rounded-lg active:scale-95 disabled:opacity-50 disabled:active:scale-100'
+							disabled={deletingAll}
+							onClick={confirmDeleteAllCategories}
+						>
+							{deletingAll ? 'Borrando...' : 'Borrar todas las categorías'}
 						</button>
 					</div>
 				</div>
