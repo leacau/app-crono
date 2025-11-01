@@ -5,57 +5,30 @@ import { use, useEffect, useState } from 'react';
 import { supabase } from '../../../../lib/supabaseClient';
 import { useRouter } from 'next/navigation';
 
-/**
- * ResultRow:
- * Lo que TERMINAMOS mostrando en pantalla para cada corredor.
- * Es el "mejor tiempo" consolidado por participante.
- */
-type ResultRow = {
-	participant_id: number;
-	bib_number: string | null;
+type Race = {
+	id: number;
+	name: string;
+	date: string;
+	location: string | null;
+	status: string;
+};
+
+// De nuevo: Supabase nos devuelve participant como array.
+type ResultParticipant = {
+	id: number;
+	bib_number: number | null;
 	first_name: string;
 	last_name: string;
 	sex: string;
-	distance_km: number;
+	distance_km: number | null;
 	category_id: number | null;
-	category_name: string | null;
-	best_elapsed_ms: number;
+	category: { name: string }[];
 };
 
-/**
- * CategoryOption:
- * Para el combo de filtrado por categoría.
- */
-type CategoryOption = {
-	id: number;
-	name: string;
-};
-
-/**
- * TimelogWithParticipant:
- * Esto representa UNA FILA que viene de Supabase en la query a timelogs,
- * incluyendo el join con participants y con la categoría del participante.
- *
- * Ojo: Supabase devuelve arrays u objetos anidados con las claves que
- * pusimos en el select. Le marcamos "any" en algunos campos que pueden
- * venir null o indefinidos para que TS no rompa las bolas.
- */
-type TimelogWithParticipant = {
-	id: number;
-	participant_id: number;
-	elapsed_ms: number;
-	type: string;
-	participant: {
-		bib_number: string | null;
-		first_name: string;
-		last_name: string;
-		sex: string;
-		distance_km: number;
-		category_id: number | null;
-		category: {
-			name: string;
-		} | null;
-	} | null;
+type ResultRow = {
+	id: number; // finish_times.id
+	recorded_at: string;
+	participant: ResultParticipant[]; // array, tomamos [0]
 };
 
 export default function ResultsPage({
@@ -63,203 +36,62 @@ export default function ResultsPage({
 }: {
 	params: Promise<{ raceId: string }>;
 }) {
-	const router = useRouter();
-
-	// Next 16: params es Promise. Lo desempaquetamos con use()
 	const { raceId: raceIdStr } = use(params);
 	const raceId = Number(raceIdStr);
+	const router = useRouter();
 
-	// Estado UI
+	const [race, setRace] = useState<Race | null>(null);
+	const [results, setResults] = useState<ResultRow[]>([]);
 	const [loading, setLoading] = useState(true);
-	const [raceName, setRaceName] = useState<string>('');
 
-	const [allResults, setAllResults] = useState<ResultRow[]>([]);
-	const [categories, setCategories] = useState<CategoryOption[]>([]);
-	const [selectedCat, setSelectedCat] = useState<number | 'ALL'>('ALL');
-
-	/**
-	 * Dado msA y baseMs, devolvemos string "hh:mm:ss.mmm"
-	 * usando la diferencia (msA - baseMs). Eso nos da tiempos relativos
-	 * entre corredores, suficiente para ordenar y cantar podio.
-	 *
-	 * Más adelante vamos a reemplazar esto por tiempo oficial neto
-	 * (elapsed_ms - gun_start_ms_de_su_distancia).
-	 */
-	function formatDiffMs(msA: number, baseMs: number): string {
-		const diff = msA - baseMs; // el primero queda 0
-		let remaining = diff;
-
-		const hours = Math.floor(remaining / (1000 * 60 * 60));
-		remaining -= hours * (1000 * 60 * 60);
-
-		const minutes = Math.floor(remaining / (1000 * 60));
-		remaining -= minutes * (1000 * 60);
-
-		const seconds = Math.floor(remaining / 1000);
-		const millis = remaining - seconds * 1000;
-
-		const hh = hours.toString().padStart(2, '0');
-		const mm = minutes.toString().padStart(2, '0');
-		const ss = seconds.toString().padStart(2, '0');
-		const msStr = millis.toString().padStart(3, '0');
-
-		return `${hh}:${mm}:${ss}.${msStr}`;
-	}
-
-	/**
-	 * loadData:
-	 * - Trae nombre de la carrera
-	 * - Trae categorías activas para el filtro
-	 * - Trae timelogs (llegadas) + datos del participante
-	 * - Arma el "mejor tiempo por participante"
-	 */
+	// -------------------------------------------------
+	// Cargar carrera + resultados
+	// -------------------------------------------------
 	async function loadData() {
 		setLoading(true);
 
-		// 1. Info de la carrera (sólo nombre)
-		{
-			const { data, error } = await supabase
-				.from('races')
-				.select('name')
-				.eq('id', raceId)
-				.single();
+		const { data: raceData, error: raceErr } = await supabase
+			.from('races')
+			.select('id, name, date, location, status')
+			.eq('id', raceId)
+			.single();
 
-			if (error) {
-				console.error('Error cargando carrera:', error);
-				setRaceName('(carrera)');
-			} else {
-				setRaceName(data?.name || '(carrera)');
-			}
+		if (raceErr) {
+			console.error('Error cargando carrera:', raceErr);
+			setRace(null);
+		} else {
+			setRace(raceData as Race);
 		}
 
-		// 2. Categorías activas de esta carrera (para el combo)
-		{
-			const { data, error } = await supabase
-				.from('categories')
-				.select('id, name')
-				.eq('race_id', raceId)
-				.eq('is_active', true)
-				.order('name', { ascending: true });
-
-			if (error) {
-				console.error('Error cargando categorías:', error);
-				setCategories([]);
-			} else {
-				const opts: CategoryOption[] = (data || []).map((c: any) => ({
-					id: c.id,
-					name: c.name,
-				}));
-				setCategories(opts);
-			}
-		}
-
-		// 3. Traer timelogs (llegadas) con participante y categoría
-		//
-		// IMPORTANTE:
-		//  - Sólo type = 'finish'.
-		//  - Juntamos participant.* y participant.category.name
-		//
-		// Supabase nos va a devolver un array de TimelogWithParticipant.
-		const { data: logsData, error: logsErr } = await supabase
-			.from('timelogs')
+		// finish_times ordenado por recorded_at asc => primero que llegó va primero
+		const { data: finData, error: finErr } = await supabase
+			.from('finish_times')
 			.select(
 				`
         id,
-        participant_id,
-        elapsed_ms,
-        type,
-        participant:participant_id (
+        recorded_at,
+        participant:participant_id(
+          id,
           bib_number,
           first_name,
           last_name,
           sex,
           distance_km,
           category_id,
-          category:category_id (
-            name
-          )
+          category:category_id(name)
         )
       `
 			)
 			.eq('race_id', raceId)
-			.eq('type', 'finish');
+			.order('recorded_at', { ascending: true });
 
-		if (logsErr) {
-			console.error('Error cargando timelogs:', logsErr);
-			setAllResults([]);
-			setLoading(false);
-			return;
+		if (finErr) {
+			console.error('Error cargando resultados:', finErr);
+			setResults([]);
+		} else {
+			setResults(finData as unknown as ResultRow[]);
 		}
 
-		// Seguridad: casteamos explícitamente para que TS entienda.
-		const safeLogs: TimelogWithParticipant[] = (logsData || []).map(
-			(row: any): TimelogWithParticipant => ({
-				id: row.id,
-				participant_id: row.participant_id,
-				elapsed_ms: row.elapsed_ms,
-				type: row.type,
-				participant: row.participant
-					? {
-							bib_number: row.participant.bib_number ?? null,
-							first_name: row.participant.first_name ?? '',
-							last_name: row.participant.last_name ?? '',
-							sex: row.participant.sex ?? '',
-							distance_km: row.participant.distance_km ?? 0,
-							category_id:
-								row.participant.category_id === null ||
-								row.participant.category_id === undefined
-									? null
-									: row.participant.category_id,
-							category: row.participant.category
-								? {
-										name: row.participant.category.name ?? '',
-								  }
-								: null,
-					  }
-					: null,
-			})
-		);
-
-		// 4. Para cada participante, quedarnos con el mejor (menor) elapsed_ms
-		// Creamos un diccionario indexed por participant_id
-		const bestByRunner: Record<number, ResultRow> = {};
-
-		for (const row of safeLogs) {
-			if (!row.participant) {
-				continue;
-			}
-
-			const pid = row.participant_id;
-			const thisMs = Number(row.elapsed_ms);
-
-			const maybeExisting = bestByRunner[pid];
-
-			if (!maybeExisting || thisMs < maybeExisting.best_elapsed_ms) {
-				bestByRunner[pid] = {
-					participant_id: pid,
-					bib_number: row.participant.bib_number ?? null,
-					first_name: row.participant.first_name ?? '',
-					last_name: row.participant.last_name ?? '',
-					sex: row.participant.sex ?? '',
-					distance_km: row.participant.distance_km ?? 0,
-					category_id:
-						row.participant.category_id === undefined
-							? null
-							: row.participant.category_id,
-					category_name: row.participant.category
-						? row.participant.category.name
-						: null,
-					best_elapsed_ms: thisMs,
-				};
-			}
-		}
-
-		// 5. Pasamos el diccionario a array y ordenamos por mejor tiempo ascendente
-		const arr = Object.values(bestByRunner).sort(
-			(a, b) => a.best_elapsed_ms - b.best_elapsed_ms
-		);
-
-		setAllResults(arr);
 		setLoading(false);
 	}
 
@@ -268,132 +100,171 @@ export default function ResultsPage({
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [raceId]);
 
-	// Filtrar por categoría (combo)
-	const filtered = allResults.filter((r) => {
-		if (selectedCat === 'ALL') return true;
-		return r.category_id === selectedCat;
-	});
+	// -------------------------------------------------
+	// Helpers visuales
+	// -------------------------------------------------
+	function formatClock(ts: string) {
+		const d = new Date(ts);
+		if (isNaN(d.getTime())) return '—';
+		return d.toLocaleTimeString();
+	}
 
-	// Referencia para calcular los tiempos relativos
-	const baseTime =
-		filtered.length > 0 ? filtered[0].best_elapsed_ms : Date.now();
+	// -------------------------------------------------
+	// Render
+	// -------------------------------------------------
+
+	if (loading && !race) {
+		return (
+			<main className='min-h-screen bg-neutral-950 text-white p-4'>
+				<div className='text-neutral-400 text-sm'>
+					Cargando clasificación...
+				</div>
+			</main>
+		);
+	}
+
+	if (!race) {
+		return (
+			<main className='min-h-screen bg-neutral-950 text-white p-4'>
+				<div className='text-red-400 mb-4'>Carrera no encontrada</div>
+				<button
+					className='bg-neutral-800 border border-neutral-600 rounded-lg px-4 py-2 text-white'
+					onClick={() => router.push('/')}
+				>
+					Volver
+				</button>
+			</main>
+		);
+	}
 
 	return (
-		<main className='min-h-screen bg-neutral-950 text-white p-4 pb-24 flex flex-col gap-4'>
+		<main className='min-h-screen bg-neutral-950 text-white p-4 pb-24'>
 			{/* HEADER */}
-			<div className='flex flex-col gap-2'>
-				<div className='text-sm text-neutral-400 flex items-center gap-2'>
+			<div className='flex flex-col gap-1 mb-4'>
+				<div className='text-sm text-neutral-400 flex items-center gap-2 flex-wrap'>
 					<button
 						className='underline text-neutral-300'
 						onClick={() => router.push(`/race/${raceId}`)}
 					>
-						← Volver
+						← {race.name}
 					</button>
 					<span className='text-neutral-600'>/</span>
-					<span className='text-neutral-400'>Resultados</span>
+					<span>Clasificación</span>
 				</div>
 
-				<div className='flex flex-col'>
-					<div className='text-2xl font-bold leading-tight'>
-						{raceName || 'Carrera'}
-					</div>
+				<div className='min-w-0'>
+					<h1 className='text-2xl font-bold leading-tight break-words'>
+						Resultados oficiales
+					</h1>
 					<div className='text-sm text-neutral-400'>
-						Clasificación provisoria
+						{race.date} · {race.location || 'Sin ubicación'}
+					</div>
+					<div className='text-[11px] text-neutral-500 mt-1'>
+						Estado:{' '}
+						<span
+							className={
+								race.status === 'open'
+									? 'text-emerald-400'
+									: race.status === 'closed'
+									? 'text-red-400'
+									: 'text-neutral-300'
+							}
+						>
+							{race.status || '—'}
+						</span>
 					</div>
 				</div>
 			</div>
 
-			{/* FILTRO DE CATEGORÍA */}
-			<div className='flex flex-col gap-2 bg-neutral-900 border border-neutral-700 rounded-xl p-3'>
-				<label className='text-xs text-neutral-400'>
-					Filtrar por categoría
-				</label>
-				<select
-					className='rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-sm'
-					value={selectedCat}
-					onChange={(e) => {
-						const v = e.target.value;
-						if (v === 'ALL') {
-							setSelectedCat('ALL');
-						} else {
-							setSelectedCat(Number(v));
-						}
-					}}
-				>
-					<option value='ALL'>Todas las categorías</option>
-					{categories.map((c) => (
-						<option key={c.id} value={c.id}>
-							{c.name}
-						</option>
-					))}
-				</select>
-			</div>
+			{/* TABLA RESULTADOS */}
+			{results.length === 0 ? (
+				<div className='text-neutral-400 text-sm'>
+					Aún no hay llegadas registradas.
+				</div>
+			) : (
+				<div className='border border-neutral-700 bg-neutral-900 rounded-xl overflow-hidden'>
+					<div className='overflow-x-auto'>
+						<table className='min-w-full text-left text-sm text-neutral-200'>
+							<thead className='bg-neutral-800 text-[11px] uppercase text-neutral-400'>
+								<tr>
+									<th className='px-3 py-2 whitespace-nowrap'>Pos</th>
+									<th className='px-3 py-2 whitespace-nowrap'>Dorsal</th>
+									<th className='px-3 py-2 whitespace-nowrap'>Nombre</th>
+									<th className='px-3 py-2 whitespace-nowrap'>Sexo</th>
+									<th className='px-3 py-2 whitespace-nowrap'>Dist</th>
+									<th className='px-3 py-2 whitespace-nowrap'>Categoría</th>
+									<th className='px-3 py-2 whitespace-nowrap'>Hora llegada</th>
+								</tr>
+							</thead>
+							<tbody>
+								{results.map((r, idx) => {
+									// agarramos al corredor del array
+									const runner =
+										r.participant && r.participant[0] ? r.participant[0] : null;
 
-			{/* TABLA / LISTA DE RESULTADOS */}
-			<section className='flex flex-col gap-2'>
-				{loading ? (
-					<div className='text-neutral-400 text-sm'>Cargando resultados...</div>
-				) : filtered.length === 0 ? (
-					<div className='text-neutral-400 text-sm'>
-						No hay llegadas registradas todavía.
+									return (
+										<tr
+											key={r.id}
+											className={
+												idx % 2 === 0 ? 'bg-neutral-900' : 'bg-neutral-950/40'
+											}
+										>
+											<td className='px-3 py-2 text-white font-semibold text-[13px]'>
+												{idx + 1}
+											</td>
+											<td className='px-3 py-2 text-white font-semibold text-[13px]'>
+												#{runner?.bib_number ?? '—'}
+											</td>
+											<td className='px-3 py-2'>
+												<div className='text-white text-[13px] font-semibold leading-tight'>
+													{runner
+														? `${runner.first_name} ${runner.last_name}`
+														: '—'}
+												</div>
+											</td>
+											<td className='px-3 py-2 text-[13px] text-neutral-300'>
+												{runner?.sex ?? '—'}
+											</td>
+											<td className='px-3 py-2 text-[13px] text-neutral-300'>
+												{runner?.distance_km != null
+													? `${runner.distance_km}K`
+													: '—'}
+											</td>
+											<td className='px-3 py-2 text-[13px] text-neutral-300'>
+												{runner?.category && runner.category.length > 0
+													? runner.category[0].name
+													: '—'}
+											</td>
+											<td className='px-3 py-2 text-[13px] text-neutral-300'>
+												{formatClock(r.recorded_at)}
+											</td>
+										</tr>
+									);
+								})}
+							</tbody>
+						</table>
 					</div>
-				) : (
-					<ul className='flex flex-col gap-2'>
-						{filtered.map((res, index) => (
-							<li
-								key={res.participant_id}
-								className='rounded-lg border border-neutral-700 bg-neutral-900 p-3 text-sm flex flex-col'
-							>
-								{/* fila principal: posición + nombre + dorsal */}
-								<div className='flex justify-between items-start'>
-									<div className='flex flex-col'>
-										<div className='text-xl font-bold leading-none'>
-											#{index + 1}
-										</div>
 
-										<div className='font-semibold leading-tight'>
-											{res.last_name.toUpperCase()}, {res.first_name}
-										</div>
+					<div className='p-3 text-[10px] text-neutral-500 border-t border-neutral-800'>
+						Ordenado por llegada (el primero que cruzó, primero en la tabla).
+						Próximo paso: guardar y mostrar tiempo neto (mm:ss.mmm).
+					</div>
+				</div>
+			)}
 
-										<div className='text-neutral-400 text-xs leading-tight'>
-											Dorsal {res.bib_number || 's/d'} · {res.sex} ·{' '}
-											{res.distance_km}K
-										</div>
-									</div>
-
-									<div className='text-right text-xs text-neutral-400'>
-										<div className='font-mono text-sm text-white'>
-											{formatDiffMs(res.best_elapsed_ms, baseTime)}
-										</div>
-										<div className='text-[10px] text-neutral-500'>
-											{res.category_name || 'Sin categoría'}
-										</div>
-									</div>
-								</div>
-
-								{/* debug opcional para control interno */}
-								<div className='text-[10px] text-neutral-600 font-mono mt-2'>
-									bruto(ms): {res.best_elapsed_ms}
-								</div>
-							</li>
-						))}
-					</ul>
-				)}
-			</section>
-
-			{/* CTA flotante futura: podio rápido */}
-			<div className='fixed bottom-4 right-4 flex flex-col gap-2'>
-				<button
-					className='bg-blue-600 text-white font-semibold text-sm px-4 py-3 rounded-xl active:scale-95'
-					onClick={() => {
-						// En la siguiente iteración esto va a mostrar top 3 de la categoría seleccionada
-						alert(
-							'Vista Podio rápido (top 3 de la categoría seleccionada) - próximo paso'
-						);
-					}}
-				>
-					Podio rápido
-				</button>
+			{/* ROADMAP */}
+			<div className='mt-6 text-[11px] text-neutral-500 leading-relaxed border-t border-neutral-800 pt-4'>
+				<div className='mb-2 font-medium text-neutral-300 text-[12px]'>
+					Próximo upgrade:
+				</div>
+				<ul className='list-disc list-inside space-y-1'>
+					<li>
+						Guardar <span className='text-neutral-300'>elapsed_ms</span> en
+						`finish_times` y formatear mm:ss.mmm.
+					</li>
+					<li>Filtros rápidos (por distancia, sexo, categoría activa).</li>
+					<li>Exportar a Excel/CSV.</li>
+				</ul>
 			</div>
 		</main>
 	);
