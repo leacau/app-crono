@@ -31,8 +31,8 @@ type ParticipantRow = {
 };
 
 type FailedImportRow = {
-	rowData: any;
-	errorMsg: string;
+	rowData: any; // fila que intentamos subir (ya normalizada)
+	errorMsg: string; // motivo concreto
 };
 
 export default function ParticipantsPage({
@@ -47,7 +47,7 @@ export default function ParticipantsPage({
 	// Carrera
 	const [race, setRace] = useState<Race | null>(null);
 
-	// Participantes en BD
+	// Participantes ya cargados
 	const [participants, setParticipants] = useState<ParticipantRow[]>([]);
 	const [loading, setLoading] = useState(true);
 
@@ -74,38 +74,16 @@ export default function ParticipantsPage({
 	const [importErr, setImportErr] = useState('');
 	const [importing, setImporting] = useState(false);
 
-	// filas rechazadas durante importación fila a fila
+	// filas rechazadas durante la importación fila-a-fila
 	const [failedRows, setFailedRows] = useState<FailedImportRow[]>([]);
 
 	const fileInputRef = useRef<HTMLInputElement | null>(null);
 
 	// ============================================================
-	// HELPERS DE LIMPIEZA Y NORMALIZACIÓN
+	// Helpers de normalización
 	// ============================================================
 
-	// Limpia nombre/apellido:
-	// - saca espacios adelante/atrás
-	// - reemplaza múltiples espacios internos por uno solo
-	function cleanName(v: any): string {
-		let s = String(v ?? '').trim();
-		s = s.replace(/\s+/g, ' '); // colapsa espacios intermedios
-		return s;
-	}
-
-	// Deja sólo dígitos (para DNI, edad, dorsal)
-	// "12.345.678 " -> "12345678"
-	function cleanDigits(v: any): string {
-		return String(v ?? '').replace(/[^\d]/g, '');
-	}
-
-	// Distancia: queremos número sin espacios.
-	// Igual seguimos aceptando inputs tipo "10K", "21 km", "5,5"
-	// Este helper elimina espacios ANTES de parsear.
-	function sanitizeDistanceRaw(v: any): string {
-		return String(v ?? '').replace(/\s+/g, '');
-	}
-
-	// Extrae número de strings tipo "10K", "21km", "5,5", "5.5"
+	// Número dentro de strings tipo "10K", "21 km", "5,5"
 	function extractNumberLike(v: any): number | null {
 		if (v === undefined || v === null) return null;
 		const s = String(v).trim();
@@ -118,18 +96,20 @@ export default function ParticipantsPage({
 		return n;
 	}
 
-	// Edad: la querés solo número entero
-	// "38 años", " 38 " -> 38
-	function extractAgeInt(v: any): number | null {
-		const digits = cleanDigits(v);
-		if (!digits) return null;
-		const n = Number(digits);
+	// Edad tipo "38", "38 años"
+	function extractAge(v: any): number | null {
+		if (v === undefined || v === null) return null;
+		const s = String(v).trim();
+		if (!s) return null;
+		const m = s.match(/(\d{1,3})/);
+		if (!m) return null;
+		const n = Number(m[1]);
 		if (!Number.isFinite(n)) return null;
 		if (n < 0 || n > 120) return null;
 		return n;
 	}
 
-	// Normaliza sexo para M/F/X/ALL
+	// Sexo → "M" | "F" | "X" | "ALL"
 	function normalizeSex(v: any): string {
 		if (!v && v !== 0) return '';
 		const s = String(v).trim().toUpperCase();
@@ -182,14 +162,12 @@ export default function ParticipantsPage({
 		return null;
 	}
 
-	// Calcula edad final:
-	// - Si viene edad explícita (ya limpia), usarla.
-	// - Si no, calcular desde fecha de nacimiento.
-	function deriveAge(
-		birthISO: string | null,
-		cleanedAgeDigits: any
-	): number | null {
-		const direct = extractAgeInt(cleanedAgeDigits);
+	// Calcula edad final.
+	// Prioridad:
+	// 1. Edad explícita en planilla.
+	// 2. Calcular desde fecha de nacimiento.
+	function deriveAge(birthISO: string | null, ageRaw: any): number | null {
+		const direct = extractAge(ageRaw);
 		if (direct !== null) return direct;
 
 		if (!birthISO) return null;
@@ -216,26 +194,34 @@ export default function ParticipantsPage({
 		return years;
 	}
 
-	// Generar chip en base al dorsal limpio
-	// chip = "LT" + dorsal con padStart(5,"0")
-	// dorsal "152" -> "LT00152"
-	// dorsal "7"   -> "LT00007"
-	// más de 5 dígitos => inválido
-	function makeChipFromBibNumberString(bibDigits: string): string | null {
-		if (!bibDigits) return null;
-		if (bibDigits.length > 5) return null;
-		const padded = bibDigits.padStart(5, '0');
+	// Formatear chip en base al dorsal.
+	// Regla:
+	//   chip = "LT" + dorsal padded a 5 dígitos
+	//   dorsal=152 -> "LT00152"
+	//   dorsal=7   -> "LT00007"
+	//   Si dorsal tiene >5 dígitos => inválido
+	function makeChipFromBib(bibNumber: number | null): string | null {
+		if (bibNumber === null || bibNumber === undefined) return null;
+		const raw = String(bibNumber).trim();
+		if (!raw) return null;
+
+		if (raw.length > 5) {
+			// No permitimos bibs de más de 5 dígitos porque rompe la convención.
+			return null;
+		}
+
+		const padded = raw.padStart(5, '0'); // completa con ceros adelante
 		return 'LT' + padded;
 	}
 
 	// ============================================================
-	// CARGA INICIAL DESDE SUPABASE
+	// Carga inicial carrera + participantes + DNIs existentes
 	// ============================================================
 
 	async function loadData() {
 		setLoading(true);
 
-		// Carrera
+		// carrera
 		const { data: raceData, error: raceErr } = await supabase
 			.from('races')
 			.select('id, name, date, location, status')
@@ -249,7 +235,7 @@ export default function ParticipantsPage({
 			setRace(raceData as Race);
 		}
 
-		// Participantes
+		// participantes
 		const { data: partData, error: partErr } = await supabase
 			.from('participants')
 			.select(
@@ -279,7 +265,7 @@ export default function ParticipantsPage({
 			const list = (partData || []) as ParticipantRow[];
 			setParticipants(list);
 
-			// cacheamos DNIs ya cargados
+			// armamos set de DNIs ya usados (no null)
 			const dset = new Set<string>();
 			for (const p of list) {
 				if (p.dni && p.dni.trim()) {
@@ -289,12 +275,11 @@ export default function ParticipantsPage({
 			setExistingDnis(dset);
 		}
 
-		// reseteo del importador
+		// reset importador
 		setImportErr('');
 		setImportStep('idle');
 		setRawHeaders([]);
 		setRawRows([]);
-
 		setMapFirstName('');
 		setMapLastName('');
 		setMapDni('');
@@ -315,7 +300,7 @@ export default function ParticipantsPage({
 	}, [raceId]);
 
 	// ============================================================
-	// MÉTRICAS (KPI)
+	// Métricas: total / por distancia / por sexo
 	// ============================================================
 
 	const totalCount = useMemo(() => participants.length, [participants]);
@@ -339,7 +324,7 @@ export default function ParticipantsPage({
 	}, [participants]);
 
 	// ============================================================
-	// 1) SELECCIÓN DE ARCHIVO
+	// 1) Usuario selecciona archivo
 	// ============================================================
 
 	async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -374,7 +359,9 @@ export default function ParticipantsPage({
 			const firstSheet = workbook.SheetNames[0];
 			const sheet = workbook.Sheets[firstSheet];
 
-			const jsonRows: any[] = XLSX.utils.sheet_to_json(sheet, { raw: false });
+			const jsonRows: any[] = XLSX.utils.sheet_to_json(sheet, {
+				raw: false,
+			});
 
 			if (!jsonRows || jsonRows.length === 0) {
 				setImportErr('El archivo está vacío o no se pudo leer.');
@@ -391,7 +378,7 @@ export default function ParticipantsPage({
 	}
 
 	// ============================================================
-	// 2) VALIDAR MAPEO (columnas obligatorias)
+	// 2) Validar mapeo
 	// ============================================================
 
 	function validateMappingAndPrepare() {
@@ -411,13 +398,15 @@ export default function ParticipantsPage({
 			return;
 		}
 
-		// birth_date / age son opcionales.
+		// Edad / fecha nac son opcionales.
 		setImportStep('ready');
 	}
 
 	// ============================================================
-	// 3) IMPORTAR FILA A FILA
-	// Limpieza y validación estricta ANTES de subir
+	// 3) Import fila-a-fila con:
+	//    - DNI único
+	//    - Dorsal obligatorio + chip autogenerado
+	//    - Si algo falla => va a failedRows
 	// ============================================================
 
 	async function handleImportToSupabase() {
@@ -437,86 +426,78 @@ export default function ParticipantsPage({
 		const newFailed: FailedImportRow[] = [];
 		let successCount = 0;
 
-		// Para evitar DNIs duplicados en el mismo batch
+		// Para evitar DNIs repetidos dentro del mismo archivo
 		const seenThisBatch = new Set<string>();
 
 		for (const row of rawRows) {
-			// 1. Tomamos crudo
-			const rawFirstName = row[mapFirstName];
-			const rawLastName = row[mapLastName];
-			const rawDni = row[mapDni];
-			const rawSex = row[mapSex];
-			const rawDistance = row[mapDistance];
-			const rawBib = row[mapBib];
+			// Campos base
+			const firstNameVal = row[mapFirstName];
+			const lastNameVal = row[mapLastName];
+			const dniRawVal = row[mapDni];
+			const sexVal = row[mapSex];
+			const distVal = row[mapDistance];
+			const bibVal = row[mapBib];
 
-			const rawBirth = mapBirthDate ? row[mapBirthDate] : null;
-			const rawAge = mapAge ? row[mapAge] : null;
-
-			// 2. Limpiamos según tus reglas
-			const firstNameTrim = cleanName(rawFirstName);
-			const lastNameTrim = cleanName(rawLastName);
-
-			// DNI solo dígitos
-			const dniClean = cleanDigits(rawDni);
-
-			// Sexo normalizado
-			const normSex = normalizeSex(rawSex);
-
-			// Distancia: sacamos espacios primero, después extraemos número
-			const distanceSanitized = sanitizeDistanceRaw(rawDistance);
-			const distNum = extractNumberLike(distanceSanitized);
-
-			// Dorsal: dígitos puros
-			const bibDigits = cleanDigits(rawBib);
-			const bibNum = bibDigits && bibDigits !== '' ? Number(bibDigits) : null;
-
-			// Fecha nacimiento normalizada
-			const birthISO = normalizeDate(rawBirth);
-
-			// Edad: sólo dígitos, entero
-			// deriveAge se encarga de usar cleanedAgeDigits o birthISO
-			const finalAge = deriveAge(birthISO, cleanDigits(rawAge));
-
-			// 3. Validaciones duras
-			if (!firstNameTrim || !lastNameTrim) {
-				newFailed.push({
-					rowData: row,
-					errorMsg: 'Nombre o apellido vacío/después de limpiar espacios.',
-				});
-				continue;
-			}
-
-			if (!dniClean) {
+			// Validaciones básicas
+			if (
+				firstNameVal === undefined ||
+				lastNameVal === undefined ||
+				dniRawVal === undefined ||
+				sexVal === undefined ||
+				distVal === undefined ||
+				bibVal === undefined
+			) {
 				newFailed.push({
 					rowData: row,
 					errorMsg:
-						'DNI vacío o inválido. Debe tener solo números, sin puntos, sin comas.',
+						'Faltan columnas básicas (Nombre, Apellido, DNI, Sexo, Distancia o Dorsal).',
 				});
 				continue;
 			}
 
-			// DNI único contra BD y dentro del mismo archivo
-			if (existingDnis.has(dniClean)) {
+			const firstNameTrim = String(firstNameVal).trim();
+			const lastNameTrim = String(lastNameVal).trim();
+			const dniTrim = String(dniRawVal).trim();
+			const normSex = normalizeSex(sexVal);
+			const distNum = extractNumberLike(distVal);
+			const bibNum = extractNumberLike(bibVal);
+
+			if (!firstNameTrim || !lastNameTrim) {
 				newFailed.push({
 					rowData: row,
-					errorMsg: `DNI duplicado con la base existente (${dniClean}).`,
+					errorMsg: 'Nombre o apellido vacío.',
 				});
 				continue;
 			}
-			if (seenThisBatch.has(dniClean)) {
+
+			if (!dniTrim) {
 				newFailed.push({
 					rowData: row,
-					errorMsg: `DNI repetido dentro del archivo (${dniClean}).`,
+					errorMsg: 'DNI vacío. Es obligatorio y debe ser único.',
 				});
 				continue;
 			}
-			seenThisBatch.add(dniClean);
+
+			if (existingDnis.has(dniTrim)) {
+				newFailed.push({
+					rowData: row,
+					errorMsg: `DNI duplicado con la base existente (${dniTrim}).`,
+				});
+				continue;
+			}
+			if (seenThisBatch.has(dniTrim)) {
+				newFailed.push({
+					rowData: row,
+					errorMsg: `DNI repetido dentro del archivo (${dniTrim}).`,
+				});
+				continue;
+			}
+			seenThisBatch.add(dniTrim);
 
 			if (!normSex) {
 				newFailed.push({
 					rowData: row,
-					errorMsg:
-						'Sexo vacío o ilegible después de limpiar. Debe poder mapearse a M/F/X/ALL.',
+					errorMsg: 'Sexo vacío o ilegible.',
 				});
 				continue;
 			}
@@ -524,49 +505,59 @@ export default function ParticipantsPage({
 			if (distNum === null) {
 				newFailed.push({
 					rowData: row,
-					errorMsg:
-						'Distancia no reconocible (tiene que ser número, sin letras fuera de formato permitido).',
+					errorMsg: 'Distancia no reconocible.',
 				});
 				continue;
 			}
 
-			if (bibNum === null || !Number.isFinite(bibNum)) {
+			if (bibNum === null) {
 				newFailed.push({
 					rowData: row,
 					errorMsg:
-						'Dorsal inválido. Debe ser solo números, sin puntos ni comas.',
+						'Dorsal vacío o ilegible. Es obligatorio para generar el chip.',
 				});
 				continue;
 			}
 
-			// Generar chip usando el dorsal limpio
-			const chipVal = makeChipFromBibNumberString(bibDigits);
+			// Generar chip
+			const chipVal = makeChipFromBib(bibNum);
 			if (!chipVal) {
 				newFailed.push({
 					rowData: row,
 					errorMsg:
-						'Dorsal inválido para chip. Debe ser numérico hasta 5 dígitos.',
+						'Dorsal inválido para chip. Debe ser numérico y máx 5 dígitos.',
 				});
 				continue;
 			}
 
-			// 4. Armamos la fila lista para Supabase
+			// Campos edad / fecha
+			const birthRaw =
+				mapBirthDate && row[mapBirthDate] !== undefined
+					? row[mapBirthDate]
+					: null;
+			const ageRaw = mapAge && row[mapAge] !== undefined ? row[mapAge] : null;
+
+			const birthISO = normalizeDate(birthRaw);
+			const finalAge = deriveAge(birthISO, ageRaw);
+
+			// Armamos la fila final para insertar
 			const insertRow: any = {
 				race_id: race.id,
 				first_name: firstNameTrim,
 				last_name: lastNameTrim,
-				dni: dniClean,
+				dni: dniTrim,
 				sex: normSex,
 				birth_date: birthISO,
 				age: finalAge,
 				distance_km: distNum,
 				bib_number: bibNum,
-				chip: chipVal,
+				chip: chipVal, // <-- nuevo campo chip
 				category_id: null,
+				// Para compatibilidad con tu tabla si sigue existiendo age_snapshot:
 				age_snapshot: finalAge ?? null,
 			};
 
-			// 5. Insert individual
+			// Insert individual
 			const { error: insErr } = await supabase
 				.from('participants')
 				.insert([insertRow]);
@@ -581,8 +572,8 @@ export default function ParticipantsPage({
 				});
 			} else {
 				successCount++;
-				// ya está en la base → sumamos DNI a los conocidos
-				existingDnis.add(dniClean);
+				// marcamos el DNI como usado ahora
+				existingDnis.add(dniTrim);
 			}
 		}
 
@@ -603,11 +594,12 @@ export default function ParticipantsPage({
 		}
 
 		setImporting(false);
+		// refrescamos lista
 		loadData();
 	}
 
 	// ============================================================
-	// RENDER
+	// Render
 	// ============================================================
 
 	if (loading && !race) {
@@ -743,11 +735,9 @@ export default function ParticipantsPage({
 						</div>
 						<div className='text-[11px] text-neutral-400 leading-tight'>
 							Mapeá columnas y cargamos corredor por corredor. Obligatorio:
-							Nombre, Apellido, DNI, Sexo, Distancia y Dorsal. Antes de subir: -
-							Nombre/Apellido: limpiamos espacios dobles. - DNI: quitamos
-							puntos, comas, espacios → queda solo número. - Distancia: sacamos
-							espacios y extraemos solo el número. - Edad: sólo números. -
-							Dorsal: sólo números. Generamos el chip (LT00007, LT00152, etc.).
+							Nombre, Apellido, DNI, Sexo, Distancia, Dorsal. Generamos el chip
+							automáticamente (LT + dorsal con 0s). Si una fila queda afuera,
+							vas a ver el motivo exacto.
 						</div>
 					</div>
 
@@ -775,9 +765,9 @@ export default function ParticipantsPage({
 							Mapeo de columnas
 						</div>
 						<div className='text-[11px] text-neutral-400 leading-tight'>
-							DNI no puede repetirse. Dorsal debe ser numérico → chip se genera
-							automático. Edad o fecha de nacimiento ayudan, pero no frenan la
-							carga.
+							DNI no puede repetirse. El dorsal se usa para crear el chip
+							(LT00007, LT00152, etc.). Edad y fecha de nacimiento ayudan con
+							categorías, pero no frenan la importación.
 						</div>
 
 						<div className='grid grid-cols-2 gap-3 text-[13px] text-white'>
@@ -828,7 +818,7 @@ export default function ParticipantsPage({
 									))}
 								</select>
 								<div className='text-[10px] text-neutral-500 leading-tight'>
-									Le sacamos puntos, comas y espacios.
+									Obligatorio. No puede repetirse.
 								</div>
 							</label>
 
@@ -862,6 +852,9 @@ export default function ParticipantsPage({
 										</option>
 									))}
 								</select>
+								<div className='text-[10px] text-neutral-500 leading-tight'>
+									Soporta DD/MM/YYYY, YYYY-MM-DD, etc.
+								</div>
 							</label>
 
 							<label className='flex flex-col gap-1'>
@@ -878,9 +871,6 @@ export default function ParticipantsPage({
 										</option>
 									))}
 								</select>
-								<div className='text-[10px] text-neutral-500 leading-tight'>
-									Guardamos solo el número entero.
-								</div>
 							</label>
 
 							<label className='flex flex-col gap-1'>
@@ -898,7 +888,7 @@ export default function ParticipantsPage({
 									))}
 								</select>
 								<div className='text-[10px] text-neutral-500 leading-tight'>
-									Le quitamos espacios y extraemos el número.
+									Ej: 5 / 10K / 21 km
 								</div>
 							</label>
 
@@ -917,7 +907,7 @@ export default function ParticipantsPage({
 									))}
 								</select>
 								<div className='text-[10px] text-neutral-500 leading-tight'>
-									Sólo números. Con eso generamos el chip.
+									Usamos esto para generar el chip (LT + 000xx).
 								</div>
 							</label>
 						</div>
@@ -950,9 +940,8 @@ export default function ParticipantsPage({
 							Participantes EXCLUIDOS ({failedRows.length})
 						</div>
 						<div className='text-[11px] text-red-300 leading-tight'>
-							Estas filas NO se cargaron. Motivo a la vista (DNI duplicado,
-							distancia inválida, dorsal mal formateado, etc.). Corregí y
-							reintentá sólo con ellos.
+							Estas filas NO se cargaron. Motivo a la vista: DNI repetido,
+							dorsal inválido, etc. Corregí y reintentá.
 						</div>
 
 						<div className='max-h-48 overflow-y-auto text-[11px] text-neutral-200 bg-neutral-900 border border-neutral-700 rounded p-2'>
@@ -1049,8 +1038,7 @@ export default function ParticipantsPage({
 				</div>
 
 				<div className='p-3 text-[10px] text-neutral-500 border-t border-neutral-800'>
-					Este listado muestra lo que ya está guardado en Supabase, con datos
-					normalizados (DNI limpio, dorsal numérico, chip LT00000).
+					Este listado muestra los datos en Supabase, con chip generado.
 				</div>
 			</div>
 
@@ -1062,11 +1050,11 @@ export default function ParticipantsPage({
 				<ol className='list-decimal list-inside space-y-1'>
 					<li>
 						Botón “Recalcular categoría”: asignar automáticamente la category_id
-						a cada corredor según distancia / sexo / edad.
+						a cada corredor con base en distancia, sexo y edad.
 					</li>
 					<li>
-						Edición rápida inline: ajustar dorsal → chip, corregir DNI, etc.,
-						sin reimportar.
+						Edición rápida inline: corregir dorsal ↔ chip ↔ edad sin reimportar
+						desde Excel.
 					</li>
 				</ol>
 			</div>

@@ -3,215 +3,99 @@
 import { useEffect, useState } from 'react';
 
 import { supabase } from '../lib/supabaseClient';
+import { useRouter } from 'next/navigation';
 
 type Race = {
 	id: number;
 	name: string;
-	date: string; // string (viene de Supabase/Postgres)
+	date: string | null;
 	location: string | null;
-	status: string;
+	status: string | null;
 };
 
 export default function HomePage() {
+	const router = useRouter();
 	const [races, setRaces] = useState<Race[]>([]);
 	const [loading, setLoading] = useState(true);
-
-	// estado del modal
-	const [showModal, setShowModal] = useState(false);
-
-	// campos del form "nueva carrera"
-	const [newName, setNewName] = useState('');
-	const [newDate, setNewDate] = useState('');
-	const [newLocation, setNewLocation] = useState('');
-	const [saving, setSaving] = useState(false);
-	const [errorMsg, setErrorMsg] = useState('');
-
-	// 1. cargar carreras desde Supabase
-	async function loadRaces() {
-		setLoading(true);
-
-		const { data, error } = await supabase
-			.from('races')
-			.select('id, name, date, location, status')
-			.order('date', { ascending: false });
-
-		if (error) {
-			console.error('Error cargando carreras:', error);
-			setRaces([]);
-		} else {
-			setRaces(data as Race[]);
-		}
-
-		setLoading(false);
-	}
+	const [selectedRaceId, setSelectedRaceId] = useState<number | null>(null);
+	const [error, setError] = useState('');
 
 	useEffect(() => {
-		loadRaces();
+		(async () => {
+			setLoading(true);
+			setError('');
+			const { data, error } = await supabase
+				.from('races')
+				.select('id,name,date,location,status')
+				.order('date', { ascending: false });
+			if (error) {
+				console.error(error);
+				setError('No se pudieron cargar las carreras.');
+				setRaces([]);
+			} else {
+				setRaces((data || []) as Race[]);
+			}
+			setLoading(false);
+		})();
 	}, []);
 
-	// 2. guardar nueva carrera en Supabase
-	async function handleCreateRace() {
-		setSaving(true);
-		setErrorMsg('');
-
-		// validaciones básicas para no subir basura
-		if (!newName.trim()) {
-			setErrorMsg('Falta el nombre.');
-			setSaving(false);
-			return;
-		}
-		if (!newDate.trim()) {
-			setErrorMsg('Falta la fecha.');
-			setSaving(false);
-			return;
-		}
-
-		const { error } = await supabase.from('races').insert([
-			{
-				name: newName.trim(),
-				date: newDate.trim(), // YYYY-MM-DD
-				location: newLocation.trim() || null,
-				status: 'draft', // estado inicial por defecto
-			},
-		]);
-
-		if (error) {
-			console.error('Error guardando carrera:', error);
-			setErrorMsg('No se pudo guardar. Revisar consola.');
-			setSaving(false);
-			return;
-		}
-
-		// si salió bien:
-		//  - limpiamos el form
-		//  - cerramos modal
-		//  - recargamos la lista
-		setNewName('');
-		setNewDate('');
-		setNewLocation('');
-		setShowModal(false);
-		setSaving(false);
-
-		loadRaces();
+	function goToLookup() {
+		if (!selectedRaceId) return;
+		router.push(`/race/${selectedRaceId}/lookup`);
 	}
 
 	return (
-		<main className='min-h-screen p-4 flex flex-col gap-4 bg-neutral-950 text-white'>
-			{/* HEADER */}
-			<header className='flex flex-col'>
-				<h1 className='text-2xl font-bold'>Carreras</h1>
-				<p className='text-sm text-neutral-400'>
-					Vista operativa (mobile first)
+		<main className='min-h-screen bg-neutral-950 text-white p-6 flex items-center justify-center'>
+			<div className='w-full max-w-xl border border-neutral-800 bg-neutral-900 rounded-2xl p-6'>
+				<h1 className='text-2xl font-bold'>Buscador de participantes</h1>
+				<p className='text-neutral-400 text-sm mt-1'>
+					Elegí la carrera para consultar inscriptos. Acceso solo lectura.
 				</p>
-			</header>
 
-			{/* LISTA / ESTADOS */}
-			{loading && (
-				<div className='text-neutral-400 text-base'>Cargando carreras...</div>
-			)}
-
-			{!loading && races.length === 0 && (
-				<div className='text-neutral-400 text-base'>
-					No hay carreras creadas todavía.
-				</div>
-			)}
-
-			{!loading && races.length > 0 && (
-				<ul className='flex flex-col gap-3 pb-24'>
-					{races.map((race) => (
-						<li
-							key={race.id}
-							className='rounded-xl border border-neutral-700 p-4 flex flex-col bg-neutral-900 cursor-pointer active:scale-[0.99]'
-							onClick={() => {
-								window.location.href = `/race/${race.id}`;
-							}}
-						>
-							<div className='text-lg font-semibold'>{race.name}</div>
-
-							<div className='text-sm text-neutral-400'>
-								{race.date} · {race.location || 'Sin ubicación'}
-							</div>
-
-							<div className='text-xs mt-2 inline-block px-2 py-1 rounded bg-neutral-800 text-neutral-300 border border-neutral-600 w-fit'>
-								{race.status}
-							</div>
-						</li>
-					))}
-				</ul>
-			)}
-
-			{/* BOTÓN FLOTANTE */}
-			<button
-				className='fixed bottom-4 right-4 bg-emerald-600 text-white font-semibold text-base px-4 py-3 rounded-xl shadow-lg active:scale-95'
-				onClick={() => setShowModal(true)}
-			>
-				+ Nueva carrera
-			</button>
-
-			{/* MODAL DE NUEVA CARRERA */}
-			{showModal && (
-				<div className='fixed inset-0 flex items-center justify-center bg-black/70 p-4 z-50'>
-					<div className='w-full max-w-sm bg-neutral-900 border border-neutral-700 rounded-xl p-4 flex flex-col gap-4'>
-						<div className='flex items-start justify-between'>
-							<div className='text-lg font-semibold'>Nueva carrera</div>
-							<button
-								className='text-neutral-400 text-sm'
-								onClick={() => {
-									if (!saving) {
-										setShowModal(false);
-										setErrorMsg('');
-									}
-								}}
+				<div className='mt-6'>
+					<label className='text-sm text-neutral-300'>Carrera</label>
+					<div className='mt-2'>
+						{loading ? (
+							<div className='text-neutral-500 text-sm'>Cargando…</div>
+						) : error ? (
+							<div className='text-red-400 text-sm'>{error}</div>
+						) : races.length === 0 ? (
+							<div className='text-neutral-500 text-sm'>No hay carreras.</div>
+						) : (
+							<select
+								className='w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm'
+								value={selectedRaceId ?? ''}
+								onChange={(e) =>
+									setSelectedRaceId(
+										e.target.value ? Number(e.target.value) : null
+									)
+								}
 							>
-								✕
-							</button>
-						</div>
-
-						<label className='text-sm flex flex-col gap-1'>
-							<span>Nombre</span>
-							<input
-								className='w-full rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-base'
-								placeholder='Ej. 10K Costanera'
-								value={newName}
-								onChange={(e) => setNewName(e.target.value)}
-								disabled={saving}
-							/>
-						</label>
-
-						<label className='text-sm flex flex-col gap-1'>
-							<span>Fecha</span>
-							<input
-								type='date'
-								className='w-full rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-base'
-								value={newDate}
-								onChange={(e) => setNewDate(e.target.value)}
-								disabled={saving}
-							/>
-						</label>
-
-						<label className='text-sm flex flex-col gap-1'>
-							<span>Ubicación</span>
-							<input
-								className='w-full rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-base'
-								placeholder='Ej. Santa Fe'
-								value={newLocation}
-								onChange={(e) => setNewLocation(e.target.value)}
-								disabled={saving}
-							/>
-						</label>
-
-						{errorMsg && <div className='text-red-400 text-sm'>{errorMsg}</div>}
-
-						<button
-							className='w-full bg-emerald-600 text-white font-semibold text-base px-4 py-3 rounded-lg active:scale-95 disabled:opacity-50 disabled:active:scale-100'
-							disabled={saving}
-							onClick={handleCreateRace}
-						>
-							{saving ? 'Guardando...' : 'Guardar carrera'}
-						</button>
+								<option value=''>-- Elegí una carrera --</option>
+								{races.map((r) => (
+									<option key={r.id} value={r.id}>
+										{r.name} {r.date ? `· ${r.date}` : ''}{' '}
+										{r.location ? `· ${r.location}` : ''}
+									</option>
+								))}
+							</select>
+						)}
 					</div>
 				</div>
-			)}
+
+				<button
+					className='mt-6 w-full bg-emerald-600 text-white font-semibold px-4 py-3 rounded-lg disabled:opacity-50 active:scale-95'
+					disabled={!selectedRaceId}
+					onClick={goToLookup}
+				>
+					Ir al buscador
+				</button>
+
+				<div className='mt-4 text-[11px] text-neutral-500'>
+					* El resto de funcionalidades (carga, edición, cronometraje, etc.)
+					quedan ocultas en la sección de administración.
+				</div>
+			</div>
 		</main>
 	);
 }
