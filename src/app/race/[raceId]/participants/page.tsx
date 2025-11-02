@@ -40,7 +40,7 @@ type ParticipantRow = {
 	age: number | null;
 	distance_km: number | null;
 	category_id: number | null;
-	category: { name: string } | null; // <-- relación 1:1 (ya no array)
+	category: { name: string } | null; // relación 1:1
 	status: string | null;
 };
 
@@ -68,6 +68,14 @@ export default function ParticipantsPage({
 	const raceId = Number(raceIdStr);
 
 	const router = useRouter();
+
+	// Ajustá esta función si tu ruta pública de detalle es distinta
+	// Ejemplos alternativos:
+	// return `/public/race/${raceId}/participants/${pid}`;
+	// return `/participants/${pid}`;
+	function getParticipantDetailPath(pid: number) {
+		return `/race/${raceId}/participants/${pid}`;
+	}
 
 	// carrera
 	const [race, setRace] = useState<Race | null>(null);
@@ -213,8 +221,7 @@ export default function ParticipantsPage({
 			setLoading(false);
 			return;
 		} else {
-			// Supabase devuelve category como objeto o null (porque es FK única).
-			// Vamos a forzar esa forma para que TS no se enoje.
+			// normaliza category
 			const normalized = (pdata || []).map((p: any) => ({
 				...p,
 				category:
@@ -1196,8 +1203,88 @@ export default function ParticipantsPage({
 						</div>
 					</div>
 
-					{/* Tabla resumida de búsqueda */}
-					<div className='border border-neutral-700 bg-neutral-950 rounded-xl overflow-hidden max-h-64 overflow-y-auto'>
+					{/* === RESULTADOS BUSQUEDA - MOBILE CARDS (<sm) === */}
+					<div className='sm:hidden flex flex-col gap-3 max-h-64 overflow-y-auto'>
+						{filteredParticipants.length === 0 ? (
+							<div className='text-center text-neutral-500 text-[12px] py-4 border border-neutral-700 bg-neutral-950 rounded-xl'>
+								Sin resultados.
+							</div>
+						) : (
+							filteredParticipants.map((p, idx) => (
+								<div
+									key={p.id}
+									className={`rounded-xl border border-neutral-700 ${
+										idx % 2 === 0 ? 'bg-neutral-900' : 'bg-neutral-950/40'
+									} p-3 text-[13px] text-neutral-200`}
+								>
+									{/* Header: Nombre (tappable) + dorsal */}
+									<div className='flex flex-wrap justify-between gap-x-2 gap-y-1'>
+										<button
+											className='text-left font-semibold text-white leading-tight underline underline-offset-2 decoration-blue-500 active:scale-[0.98]'
+											onClick={() =>
+												router.push(getParticipantDetailPath(p.id))
+											}
+										>
+											{p.last_name}, {p.first_name}
+											<div className='text-[10px] text-neutral-500 leading-tight font-normal no-underline'>
+												#{p.id}
+											</div>
+										</button>
+
+										<div className='text-right text-neutral-300'>
+											Dorsal:{' '}
+											<span className='text-white font-semibold'>
+												{p.bib_number ?? '—'}
+											</span>
+										</div>
+									</div>
+
+									{/* Datos resumidos */}
+									<div className='grid grid-cols-2 gap-x-4 gap-y-1 mt-2 text-[12px]'>
+										<div className='text-neutral-400'>DNI</div>
+										<div className='text-neutral-200'>{p.dni}</div>
+
+										<div className='text-neutral-400'>Distancia</div>
+										<div className='text-neutral-200'>
+											{p.distance_km != null ? `${p.distance_km}K` : '—'}
+										</div>
+
+										<div className='text-neutral-400'>Cat.</div>
+										<div className='text-neutral-200'>
+											{p.category && p.category.name ? p.category.name : '—'}
+										</div>
+									</div>
+
+									{/* Acciones */}
+									<div className='flex flex-wrap justify-end gap-3 mt-3 text-[12px]'>
+										<button
+											className='bg-blue-600 px-3 py-1.5 rounded-md text-white font-semibold active:scale-95'
+											onClick={() =>
+												router.push(getParticipantDetailPath(p.id))
+											}
+										>
+											Ver
+										</button>
+										<button
+											className='text-emerald-400 underline active:scale-95'
+											onClick={() => openEditParticipant(p)}
+										>
+											Editar
+										</button>
+										<button
+											className='text-red-400 underline active:scale-95'
+											onClick={() => handleDeleteParticipant(p)}
+										>
+											Borrar
+										</button>
+									</div>
+								</div>
+							))
+						)}
+					</div>
+
+					{/* === RESULTADOS BUSQUEDA - TABLA DESKTOP (>=sm) === */}
+					<div className='hidden sm:block border border-neutral-700 bg-neutral-950 rounded-xl overflow-hidden max-h-64 overflow-y-auto'>
 						<table className='min-w-full text-left text-sm text-neutral-200'>
 							<thead className='bg-neutral-800 text-[11px] uppercase text-neutral-400'>
 								<tr>
@@ -1250,6 +1337,14 @@ export default function ParticipantsPage({
 												{p.category && p.category.name ? p.category.name : '—'}
 											</td>
 											<td className='px-3 py-2 text-right text-[13px] text-neutral-300'>
+												<button
+													className='text-blue-400 underline text-[12px] mr-3'
+													onClick={() =>
+														router.push(getParticipantDetailPath(p.id))
+													}
+												>
+													Detalles
+												</button>
 												<button
 													className='text-emerald-400 underline text-[12px] mr-3'
 													onClick={() => openEditParticipant(p)}
@@ -1362,6 +1457,14 @@ export default function ParticipantsPage({
 												{p.bib_number ?? '—'}
 											</td>
 											<td className='px-3 py-2 text-right text-[13px] text-neutral-300'>
+												<button
+													className='text-blue-400 underline text-[12px] mr-3'
+													onClick={() =>
+														router.push(getParticipantDetailPath(p.id))
+													}
+												>
+													Detalles
+												</button>
 												<button
 													className='text-emerald-400 underline text-[12px] mr-3'
 													onClick={() => openEditParticipant(p)}
