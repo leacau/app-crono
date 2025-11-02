@@ -1229,15 +1229,10 @@ export default function ParticipantsPage({
 								>
 									<div className='flex flex-wrap justify-between gap-x-2 gap-y-1'>
 										<div className='font-semibold text-white leading-tight'>
-											<button
-												className='bg-blue-600 px-3 py-1.5 rounded-md text-white font-semibold active:scale-95'
-												onClick={(e) => {
-													e.stopPropagation();
-													router.push(getParticipantDetailPath(p.id));
-												}}
-											>
-												{p.last_name}, {p.first_name}
-											</button>
+											{p.last_name}, {p.first_name}
+											<div className='text-[10px] text-neutral-500 leading-tight'>
+												#{p.id}
+											</div>
 										</div>
 										<div className='text-right text-neutral-300'>
 											Dorsal:{' '}

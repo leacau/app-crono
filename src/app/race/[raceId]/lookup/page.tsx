@@ -194,9 +194,12 @@ export default function LookupPage({
 										}
 									>
 										<td className='px-3 py-2'>
-											<div className='text-white font-semibold'>
-												{p.last_name}, {p.first_name}
-											</div>
+											<button
+												onClick={() => goToParticipant(p.id)}
+												className='bg-neutral-800 hover:bg-neutral-700 border border-neutral-600 rounded-lg px-3 py-1 text-sm'
+											>
+												{p.last_name}, {p.first_name}{' '}
+											</button>
 										</td>
 										<td className='px-3 py-2'>{p.dni ?? '—'}</td>
 										<td className='px-3 py-2'>{p.sex || '—'}</td>
