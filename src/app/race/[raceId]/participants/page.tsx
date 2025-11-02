@@ -1213,24 +1213,36 @@ export default function ParticipantsPage({
 							filteredParticipants.map((p, idx) => (
 								<div
 									key={p.id}
+									role='button'
+									tabIndex={0}
+									onClick={() => router.push(getParticipantDetailPath(p.id))}
+									onKeyDown={(e) => {
+										if (e.key === 'Enter' || e.key === ' ') {
+											e.preventDefault();
+											router.push(getParticipantDetailPath(p.id));
+										}
+									}}
 									className={`rounded-xl border border-neutral-700 ${
 										idx % 2 === 0 ? 'bg-neutral-900' : 'bg-neutral-950/40'
-									} p-3 text-[13px] text-neutral-200`}
+									} p-3 text-[13px] text-neutral-200 cursor-pointer hover:bg-neutral-900/70 transition`}
+									aria-label='Ver detalle de participante'
 								>
-									{/* Header: Nombre (tappable) + dorsal */}
 									<div className='flex flex-wrap justify-between gap-x-2 gap-y-1'>
-										<button
-											className='text-left font-semibold text-white leading-tight underline underline-offset-2 decoration-blue-500 active:scale-[0.98]'
-											onClick={() =>
-												router.push(getParticipantDetailPath(p.id))
-											}
-										>
-											{p.last_name}, {p.first_name}
-											<div className='text-[10px] text-neutral-500 leading-tight font-normal no-underline'>
+										<div className='font-semibold text-white leading-tight'>
+											<button
+												className='bg-blue-600 px-3 py-1.5 rounded-md text-white font-semibold active:scale-95'
+												onClick={(e) => {
+													e.stopPropagation();
+													router.push(getParticipantDetailPath(p.id));
+												}}
+											>
+												{p.last_name}, {p.first_name}
+											</button>
+
+											<div className='text-[10px] text-neutral-500 leading-tight'>
 												#{p.id}
 											</div>
-										</button>
-
+										</div>
 										<div className='text-right text-neutral-300'>
 											Dorsal:{' '}
 											<span className='text-white font-semibold'>
@@ -1239,7 +1251,6 @@ export default function ParticipantsPage({
 										</div>
 									</div>
 
-									{/* Datos resumidos */}
 									<div className='grid grid-cols-2 gap-x-4 gap-y-1 mt-2 text-[12px]'>
 										<div className='text-neutral-400'>DNI</div>
 										<div className='text-neutral-200'>{p.dni}</div>
@@ -1255,25 +1266,33 @@ export default function ParticipantsPage({
 										</div>
 									</div>
 
-									{/* Acciones */}
+									{/* Acciones: Ver (primario), Editar, Borrar.
+                      stopPropagation para no disparar el onClick del card */}
 									<div className='flex flex-wrap justify-end gap-3 mt-3 text-[12px]'>
 										<button
 											className='bg-blue-600 px-3 py-1.5 rounded-md text-white font-semibold active:scale-95'
-											onClick={() =>
-												router.push(getParticipantDetailPath(p.id))
-											}
+											onClick={(e) => {
+												e.stopPropagation();
+												router.push(getParticipantDetailPath(p.id));
+											}}
 										>
 											Ver
 										</button>
 										<button
 											className='text-emerald-400 underline active:scale-95'
-											onClick={() => openEditParticipant(p)}
+											onClick={(e) => {
+												e.stopPropagation();
+												openEditParticipant(p);
+											}}
 										>
 											Editar
 										</button>
 										<button
 											className='text-red-400 underline active:scale-95'
-											onClick={() => handleDeleteParticipant(p)}
+											onClick={(e) => {
+												e.stopPropagation();
+												handleDeleteParticipant(p);
+											}}
 										>
 											Borrar
 										</button>
