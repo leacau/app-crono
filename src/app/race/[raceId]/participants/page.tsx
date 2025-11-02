@@ -1,36 +1,19 @@
 'use client';
 
-import { use, useEffect, useMemo, useRef, useState } from 'react';
+import { use, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import Papa from 'papaparse';
 import { supabase } from '../../../../lib/supabaseClient';
-import * as Papa from 'papaparse';
-import * as XLSX from 'xlsx';
 
+// ------------------------------
+// Tipos de datos
+// ------------------------------
 type Race = {
 	id: number;
 	name: string;
-	date: string;
+	date: string | null;
 	location: string | null;
-	status: string;
-};
-
-type ParticipantRow = {
-	id: number;
-	bib_number: number | null;
-	chip: string | null;
-	first_name: string;
-	last_name: string;
-	dni: string | null;
-	sex: string;
-	birth_date: string | null;
-	age: number | null;
-	distance_km: number | null;
-	category_id: number | null;
-};
-
-type FailedImportRow = {
-	rowData: any;
-	errorMsg: string;
+	status: string | null;
 };
 
 type CategoryRow = {
@@ -38,150 +21,44 @@ type CategoryRow = {
 	race_id: number;
 	name: string;
 	distance_km: number | null;
-	sex_filter: string; // "M" | "F" | "X" | "ALL"
+	sex_filter: string;
 	age_min: number | null;
 	age_max: number | null;
 	is_active: boolean;
 };
 
-// ============ HELPERS DE LIMPIEZA / NORMALIZACIÓN ============
+type ParticipantRow = {
+	id: number;
+	race_id: number;
+	bib_number: number | null;
+	chip: string | null;
+	first_name: string;
+	last_name: string;
+	dni: string;
+	sex: string;
+	birth_date: string | null; // ISO
+	age: number | null;
+	distance_km: number | null;
+	category_id: number | null;
+	category: { name: string } | null; // <-- relación 1:1 (ya no array)
+	status: string | null;
+};
 
-// Limpia nombre/apellido: recorta y colapsa espacios múltiples.
-function cleanName(v: any): string {
-	let s = String(v ?? '').trim();
-	s = s.replace(/\s+/g, ' ');
-	return s;
-}
+// para la importación
+type ImportPreviewRow = {
+	first_name: string;
+	last_name: string;
+	dni: string;
+	sex: string;
+	distance_km: number;
+	bib_number: number | null;
+	birth_date: string | null;
+	age: number | null;
+};
 
-// Deja sólo dígitos (para DNI, edad, dorsal).
-function cleanDigits(v: any): string {
-	return String(v ?? '').replace(/[^\d]/g, '');
-}
-
-// Distancia: sacamos espacios primero.
-function sanitizeDistanceRaw(v: any): string {
-	return String(v ?? '').replace(/\s+/g, '');
-}
-
-// Extrae número de "10K", "21km", "5,5", etc.
-function extractNumberLike(v: any): number | null {
-	if (v === undefined || v === null) return null;
-	const s = String(v).trim();
-	if (!s) return null;
-	const m = s.match(/(\d+[.,]?\d*)/);
-	if (!m) return null;
-	const candidate = m[1].replace(',', '.');
-	const n = Number(candidate);
-	if (!Number.isFinite(n)) return null;
-	return n;
-}
-
-// Edad: sólo dígitos válidos
-function extractAgeInt(v: any): number | null {
-	const digits = cleanDigits(v);
-	if (!digits) return null;
-	const n = Number(digits);
-	if (!Number.isFinite(n)) return null;
-	if (n < 0 || n > 120) return null;
-	return n;
-}
-
-// Sexo normalizado
-function normalizeSex(v: any): string {
-	if (!v && v !== 0) return '';
-	const s = String(v).trim().toUpperCase();
-	if (s === 'M' || s.startsWith('MAS')) return 'M';
-	if (s === 'F' || s.startsWith('FEM')) return 'F';
-	if (s === 'X' || s.startsWith('NO') || s.startsWith('NB')) return 'X';
-	if (
-		s === 'ALL' ||
-		s === 'GENERAL' ||
-		s === 'G' ||
-		s === 'GEN' ||
-		s.includes('TODOS')
-	)
-		return 'ALL';
-	return s;
-}
-
-// Fecha -> YYYY-MM-DD
-function normalizeDate(v: any): string | null {
-	if (!v) return null;
-	if (v instanceof Date && !isNaN(v.getTime())) {
-		return v.toISOString().slice(0, 10);
-	}
-
-	const raw = String(v).trim();
-	if (!raw) return null;
-
-	// dd/mm/yyyy o dd-mm-yyyy
-	let m = raw.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
-	if (m) {
-		let dd = m[1].padStart(2, '0');
-		let mm = m[2].padStart(2, '0');
-		let yyyy = m[3];
-		if (yyyy.length === 2) {
-			const yrNum = Number(yyyy);
-			yyyy = yrNum < 30 ? '20' + yyyy : '19' + yyyy;
-		}
-		return `${yyyy}-${mm}-${dd}`;
-	}
-
-	// yyyy-mm-dd o yyyy/mm/dd
-	m = raw.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})$/);
-	if (m) {
-		const yyyy = m[1];
-		const mm = m[2].padStart(2, '0');
-		const dd = m[3].padStart(2, '0');
-		return `${yyyy}-${mm}-${dd}`;
-	}
-
-	return null;
-}
-
-// Calcula edad final:
-function deriveAge(
-	birthISO: string | null,
-	cleanedAgeDigits: any
-): number | null {
-	const direct = extractAgeInt(cleanedAgeDigits);
-	if (direct !== null) return direct;
-
-	if (!birthISO) return null;
-
-	const [Y, M, D] = birthISO.split('-');
-	const by = Number(Y);
-	const bm = Number(M) - 1;
-	const bd = Number(D);
-
-	if (!Number.isFinite(by) || !Number.isFinite(bm) || !Number.isFinite(bd)) {
-		return null;
-	}
-
-	const bDate = new Date(by, bm, bd);
-	if (isNaN(bDate.getTime())) return null;
-
-	const today = new Date();
-	let years = today.getFullYear() - bDate.getFullYear();
-	const mDiff = today.getMonth() - bDate.getMonth();
-	if (mDiff < 0 || (mDiff === 0 && today.getDate() < bDate.getDate())) {
-		years -= 1;
-	}
-	if (years < 0 || years > 120) return null;
-	return years;
-}
-
-// chip = "LT" + dorsal padded a 5 dígitos.
-// dorsal "152" => "LT00152"
-function makeChipFromBibNumberString(bibDigits: string): string | null {
-	if (!bibDigits) return null;
-	if (bibDigits.length > 5) return null;
-	const padded = bibDigits.padStart(5, '0');
-	return 'LT' + padded;
-}
-
-// ============================================================
-
+// ------------------------------
+// Página
+// ------------------------------
 export default function ParticipantsPage({
 	params,
 }: {
@@ -189,47 +66,57 @@ export default function ParticipantsPage({
 }) {
 	const { raceId: raceIdStr } = use(params);
 	const raceId = Number(raceIdStr);
+
 	const router = useRouter();
 
-	// Carrera
+	// carrera
 	const [race, setRace] = useState<Race | null>(null);
 
-	// Participantes en BD
+	// categorías activas (para asignación automática)
+	const [categories, setCategories] = useState<CategoryRow[]>([]);
+
+	// participantes ya existentes en la BD
 	const [participants, setParticipants] = useState<ParticipantRow[]>([]);
+
+	// estados de carga
 	const [loading, setLoading] = useState(true);
+	const [loadErr, setLoadErr] = useState('');
 
-	// Para validar DNI único
-	const [existingDnis, setExistingDnis] = useState<Set<string>>(new Set());
-
-	// KPI / búsqueda
-	const [searchQ, setSearchQ] = useState('');
-
-	// IMPORTACIÓN MASIVA
-	const [rawHeaders, setRawHeaders] = useState<string[]>([]);
-	const [rawRows, setRawRows] = useState<Record<string, any>[]>([]);
-	const [importStep, setImportStep] = useState<'idle' | 'mapped' | 'ready'>(
-		'idle'
-	);
-
-	const [mapFirstName, setMapFirstName] = useState<string>('');
-	const [mapLastName, setMapLastName] = useState<string>('');
-	const [mapDni, setMapDni] = useState<string>('');
-	const [mapSex, setMapSex] = useState<string>('');
-	const [mapBirthDate, setMapBirthDate] = useState<string>('');
-	const [mapAge, setMapAge] = useState<string>('');
-	const [mapDistance, setMapDistance] = useState<string>('');
-	const [mapBib, setMapBib] = useState<string>('');
-
-	const [importErr, setImportErr] = useState('');
+	// importación CSV/XLSX->CSV
+	const [fileObj, setFileObj] = useState<File | null>(null);
+	const [csvErr, setCsvErr] = useState('');
+	const [previewRows, setPreviewRows] = useState<ImportPreviewRow[]>([]);
+	const [excludedRows, setExcludedRows] = useState<
+		{ rowIndex: number; reason: string; raw: any }[]
+	>([]);
 	const [importing, setImporting] = useState(false);
 
-	// filas rechazadas en la importación
-	const [failedRows, setFailedRows] = useState<FailedImportRow[]>([]);
+	// mapeo de columnas
+	const [colMap, setColMap] = useState<{
+		first_name: string;
+		last_name: string;
+		dni: string;
+		sex: string;
+		distance_km: string;
+		bib_number: string;
+		birth_date: string;
+		age: string;
+	}>({
+		first_name: 'nombre',
+		last_name: 'apellido',
+		dni: 'dni',
+		sex: 'sexo',
+		distance_km: 'distancia_km',
+		bib_number: 'dorsal',
+		birth_date: 'fecha_nacimiento',
+		age: 'edad',
+	});
 
-	const fileInputRef = useRef<HTMLInputElement | null>(null);
+	// búsqueda
+	const [searchTerm, setSearchTerm] = useState('');
 
-	// FORMULARIOS INDIVIDUALES (CREAR / EDITAR)
-	const [showEditModal, setShowEditModal] = useState(false);
+	// edición puntual / alta puntual
+	const [editModalOpen, setEditModalOpen] = useState(false);
 	const [editMode, setEditMode] = useState<'new' | 'edit'>('new');
 	const [editId, setEditId] = useState<number | null>(null);
 
@@ -241,87 +128,108 @@ export default function ParticipantsPage({
 	const [formAge, setFormAge] = useState('');
 	const [formDistance, setFormDistance] = useState('');
 	const [formBib, setFormBib] = useState('');
-
+	const [formStatus, setFormStatus] = useState('registered');
 	const [formErr, setFormErr] = useState('');
-	const [savingForm, setSavingForm] = useState(false);
+	const [savingParticipant, setSavingParticipant] = useState(false);
 
-	// -------- LOAD DATA (carrera + participantes) --------
+	// ------------------------------
+	// Cargar datos iniciales
+	// ------------------------------
 	async function loadData() {
 		setLoading(true);
+		setLoadErr('');
 
-		// Carrera
-		const { data: raceData, error: raceErr } = await supabase
+		// 1. carrera
+		const { data: rdata, error: rerr } = await supabase
 			.from('races')
-			.select('id, name, date, location, status')
+			.select('id,name,date,location,status')
 			.eq('id', raceId)
 			.single();
 
-		if (raceErr) {
-			console.error('Error cargando carrera:', raceErr);
+		if (rerr) {
+			console.error(rerr);
 			setRace(null);
+			setLoadErr(rerr.message || 'No se pudo cargar la carrera seleccionada.');
+			setLoading(false);
+			return;
 		} else {
-			setRace(raceData as Race);
+			setRace(rdata as Race);
 		}
 
-		// Participantes
-		const { data: partData, error: partErr } = await supabase
+		// 2. categorías activas
+		const { data: cdata, error: cerr } = await supabase
+			.from('categories')
+			.select(
+				`
+          id,
+          race_id,
+          name,
+          distance_km,
+          sex_filter,
+          age_min,
+          age_max,
+          is_active
+        `
+			)
+			.eq('race_id', raceId)
+			.eq('is_active', true);
+
+		if (cerr) {
+			console.error('Error cargando categorías:', cerr);
+			setCategories([]);
+		} else {
+			setCategories((cdata || []) as CategoryRow[]);
+		}
+
+		// 3. participantes (IMPORTANTE: select sin campos fantasma)
+		const { data: pdata, error: perr } = await supabase
 			.from('participants')
 			.select(
 				`
-        id,
-        bib_number,
-        chip,
-        first_name,
-        last_name,
-        dni,
-        sex,
-        birth_date,
-        age,
-        distance_km,
-        category_id
-      `
+          id,
+          race_id,
+          bib_number,
+          chip,
+          first_name,
+          last_name,
+          dni,
+          sex,
+          birth_date,
+          age,
+          distance_km,
+          category_id,
+          category:categories ( name ),
+          status
+        `
 			)
 			.eq('race_id', raceId)
-			.order('bib_number', { ascending: true })
-			.order('last_name', { ascending: true });
+			.order('last_name', { ascending: true })
+			.order('first_name', { ascending: true });
 
-		if (partErr) {
-			console.error('Error cargando participantes:', partErr);
+		if (perr) {
+			console.error(perr);
 			setParticipants([]);
-			setExistingDnis(new Set());
+			setLoadErr(perr.message || 'No se pudieron cargar los participantes.');
+			setLoading(false);
+			return;
 		} else {
-			const list = (partData || []) as ParticipantRow[];
-			setParticipants(list);
-
-			// cache DNIs
-			const dset = new Set<string>();
-			for (const p of list) {
-				if (p.dni && p.dni.trim()) {
-					dset.add(p.dni.trim());
-				}
-			}
-			setExistingDnis(dset);
+			// Supabase devuelve category como objeto o null (porque es FK única).
+			// Vamos a forzar esa forma para que TS no se enoje.
+			const normalized = (pdata || []).map((p: any) => ({
+				...p,
+				category:
+					p.category && Array.isArray(p.category)
+						? p.category[0] ?? null
+						: p.category ?? null,
+			}));
+			setParticipants(normalized as ParticipantRow[]);
 		}
 
-		// limpiar estado importador/form
-		setImportErr('');
-		setImportStep('idle');
-		setRawHeaders([]);
-		setRawRows([]);
-		setMapFirstName('');
-		setMapLastName('');
-		setMapDni('');
-		setMapSex('');
-		setMapBirthDate('');
-		setMapAge('');
-		setMapDistance('');
-		setMapBib('');
-		setFailedRows([]);
-
-		setFormErr('');
-		setSavingForm(false);
-
 		setLoading(false);
+		setCsvErr('');
+		setPreviewRows([]);
+		setExcludedRows([]);
+		setFileObj(null);
 	}
 
 	useEffect(() => {
@@ -329,291 +237,419 @@ export default function ParticipantsPage({
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [raceId]);
 
-	// -------- KPI --------
+	// ------------------------------
+	// Métricas rápidas / KPIs
+	// ------------------------------
+	const totalCount = participants.length;
 
-	const totalCount = useMemo(() => participants.length, [participants]);
+	const totalWithCategory = useMemo(
+		() =>
+			participants.filter(
+				(p) =>
+					p.category_id !== null &&
+					p.category_id !== undefined &&
+					p.category_id !== 0
+			).length,
+		[participants]
+	);
+
+	const totalWithoutCategory = totalCount - totalWithCategory;
 
 	const countByDistance = useMemo(() => {
-		const acc: Record<string, number> = {};
+		const map: Record<string, number> = {};
 		for (const p of participants) {
-			const k = p.distance_km != null ? String(p.distance_km) : 'SIN_DIST';
-			acc[k] = (acc[k] || 0) + 1;
+			const key = p.distance_km != null ? String(p.distance_km) : '—';
+			map[key] = (map[key] || 0) + 1;
 		}
-		return acc;
+		return map;
 	}, [participants]);
 
 	const countBySex = useMemo(() => {
-		const acc: Record<string, number> = {};
+		const map: Record<string, number> = {};
 		for (const p of participants) {
-			const k = p.sex || 'SIN_SEXO';
-			acc[k] = (acc[k] || 0) + 1;
+			const key = p.sex || '—';
+			map[key] = (map[key] || 0) + 1;
 		}
-		return acc;
+		return map;
 	}, [participants]);
 
-	// -------- FILTRADO POR BUSCADOR EN LA TABLA --------
-	const filteredParticipants = useMemo(() => {
-		const q = searchQ.trim().toLowerCase();
-		if (!q) return participants;
-		return participants.filter((p) => {
-			const fullName = `${p.first_name} ${p.last_name}`.toLowerCase();
-			const doc = (p.dni || '').toLowerCase();
-			return (
-				fullName.includes(q) ||
-				p.first_name.toLowerCase().includes(q) ||
-				p.last_name.toLowerCase().includes(q) ||
-				doc.includes(q)
-			);
-		});
-	}, [participants, searchQ]);
+	// ------------------------------
+	// Agrupar por categoría (para vista podio)
+	// ------------------------------
+	const participantsByCategory = useMemo(() => {
+		const groups: Record<string, ParticipantRow[]> = {};
 
-	// ============================================================
-	//                 IMPORTADOR MASIVO
-	// ============================================================
-
-	async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
-		setImportErr('');
-		const file = e.target.files?.[0];
-		if (!file) return;
-
-		const nameLower = file.name.toLowerCase();
-		if (nameLower.endsWith('.csv')) {
-			Papa.parse<Record<string, any>>(file, {
-				header: true,
-				skipEmptyLines: true,
-				complete: (results) => {
-					const rows = results.data;
-					if (!rows || rows.length === 0) {
-						setImportErr('El archivo está vacío o no se pudo leer.');
-						return;
-					}
-					const headers = Object.keys(rows[0]);
-					setRawHeaders(headers);
-					setRawRows(rows);
-					setImportStep('mapped');
-				},
-				error: (err) => {
-					console.error('Error Papa:', err);
-					setImportErr('No se pudo leer el CSV.');
-				},
-			});
-		} else if (nameLower.endsWith('.xls') || nameLower.endsWith('.xlsx')) {
-			const data = await file.arrayBuffer();
-			const workbook = XLSX.read(data, { type: 'array' });
-			const firstSheet = workbook.SheetNames[0];
-			const sheet = workbook.Sheets[firstSheet];
-
-			const jsonRows: any[] = XLSX.utils.sheet_to_json(sheet, { raw: false });
-
-			if (!jsonRows || jsonRows.length === 0) {
-				setImportErr('El archivo está vacío o no se pudo leer.');
-				return;
+		for (const p of participants) {
+			let catName = 'Sin categoría';
+			if (p.category && typeof p.category.name === 'string') {
+				const n = p.category.name.trim();
+				if (n !== '') catName = n;
 			}
 
-			const headers = Object.keys(jsonRows[0]);
-			setRawHeaders(headers);
-			setRawRows(jsonRows);
-			setImportStep('mapped');
-		} else {
-			setImportErr('Formato no soportado. Usá CSV o Excel (.xlsx).');
+			if (!groups[catName]) {
+				groups[catName] = [];
+			}
+			groups[catName].push(p);
 		}
-	}
 
-	function validateMappingAndPrepare() {
-		setImportErr('');
+		// ordenar cada grupo por dorsal asc
+		for (const k of Object.keys(groups)) {
+			groups[k].sort((a, b) => {
+				const A = a.bib_number ?? 999999;
+				const B = b.bib_number ?? 999999;
+				return A - B;
+			});
+		}
 
-		if (
-			!mapFirstName ||
-			!mapLastName ||
-			!mapDni ||
-			!mapSex ||
-			!mapDistance ||
-			!mapBib
-		) {
-			setImportErr(
-				'Faltan columnas obligatorias. Necesitamos Nombre, Apellido, DNI, Sexo, Distancia y Dorsal.'
+		return groups;
+	}, [participants]);
+
+	// Lista “sin categoría” limpia
+	const unassignedParticipants = useMemo(
+		() =>
+			participants.filter(
+				(p) =>
+					!p.category_id ||
+					!p.category ||
+					!p.category.name ||
+					p.category.name.trim() === ''
+			),
+		[participants]
+	);
+
+	// ------------------------------
+	// Filtro de búsqueda rápida
+	// ------------------------------
+	const filteredParticipants = useMemo(() => {
+		if (!searchTerm.trim()) return participants;
+
+		const term = searchTerm.trim().toLowerCase();
+		return participants.filter((p) => {
+			const fullName = `${p.last_name} ${p.first_name}`.toLowerCase();
+			return (
+				fullName.includes(term) ||
+				(p.dni || '').toLowerCase().includes(term) ||
+				(p.bib_number != null &&
+					String(p.bib_number).toLowerCase().includes(term))
 			);
-			return;
-		}
+		});
+	}, [participants, searchTerm]);
 
-		setImportStep('ready');
+	// ------------------------------
+	// Helpers normalización CSV
+	// ------------------------------
+	function cleanName(raw: any): string {
+		if (!raw) return '';
+		return String(raw).trim().replace(/\s+/g, ' ');
 	}
 
-	async function handleImportToSupabase() {
-		if (!race) {
-			setImportErr('No hay carrera cargada.');
+	function cleanNumber(raw: any): string {
+		if (!raw && raw !== 0) return '';
+		return String(raw).replace(/\D+/g, '');
+	}
+
+	function cleanDistance(raw: any): number | null {
+		if (raw == null) return null;
+		const txt = String(raw)
+			.trim()
+			.replace(',', '.')
+			.replace(/[^0-9.]/g, '');
+		if (txt === '') return null;
+		const num = Number(txt);
+		if (!Number.isFinite(num)) return null;
+		return num;
+	}
+
+	function parseAgeOrBirthDate(ageTxt: any, birthTxt: any) {
+		let ageVal: number | null = null;
+		let birthVal: string | null = null;
+
+		if (birthTxt) {
+			let b = String(birthTxt).trim();
+			if (b.includes('/')) {
+				const m = b.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+				if (m) {
+					let day = m[1].padStart(2, '0');
+					let mon = m[2].padStart(2, '0');
+					let yr = m[3];
+					if (yr.length === 2) {
+						yr = '19' + yr;
+					}
+					birthVal = `${yr}-${mon}-${day}`;
+				} else {
+					birthVal = b;
+				}
+			} else {
+				birthVal = b;
+			}
+		}
+
+		if (ageTxt !== undefined && ageTxt !== null && ageTxt !== '') {
+			const n = Number(String(ageTxt).replace(/\D+/g, ''));
+			if (Number.isFinite(n) && n > 0 && n < 120) {
+				ageVal = n;
+			}
+		}
+
+		return { ageVal, birthVal };
+	}
+
+	function buildChipFromBib(bib: number | null) {
+		if (!bib && bib !== 0) return null;
+		const bibStr = String(bib);
+		const padded = bibStr.padStart(5, '0');
+		return 'LT' + padded;
+	}
+
+	// ------------------------------
+	// Parsear archivo con PapaParse (solo carga inicial)
+	// ------------------------------
+	function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+		setCsvErr('');
+		setPreviewRows([]);
+		setExcludedRows([]);
+		if (!e.target.files || e.target.files.length === 0) {
+			setFileObj(null);
 			return;
 		}
-		if (importStep !== 'ready') {
-			setImportErr('El mapeo no está listo.');
+		const f = e.target.files[0];
+		setFileObj(f);
+
+		Papa.parse(f, {
+			header: true,
+			skipEmptyLines: true,
+			complete: (results: any) => {
+				const rows: any[] = results.data || [];
+				if (!rows.length) {
+					setCsvErr('El archivo está vacío o no pude leer filas.');
+					return;
+				}
+				setPreviewRows([]);
+				setExcludedRows([]);
+			},
+			error: (err: any) => {
+				console.error('Papa parse error:', err);
+				setCsvErr('Error leyendo el archivo. Revisá el formato.');
+			},
+		});
+	}
+
+	// Procesar archivo según el mapping
+	function handleProcessFile() {
+		if (!fileObj) {
+			setCsvErr('Primero seleccioná un archivo.');
+			return;
+		}
+
+		setCsvErr('');
+		setPreviewRows([]);
+		setExcludedRows([]);
+
+		Papa.parse(fileObj, {
+			header: true,
+			skipEmptyLines: true,
+			complete: (results: any) => {
+				const rawRows: any[] = results.data || [];
+
+				const goodRows: ImportPreviewRow[] = [];
+				const badRows: { rowIndex: number; reason: string; raw: any }[] = [];
+
+				rawRows.forEach((r, idx) => {
+					const lastName = cleanName(r[colMap.last_name]);
+					const firstName = cleanName(r[colMap.first_name]);
+					const dni = cleanNumber(r[colMap.dni]);
+					const sex = (r[colMap.sex] || '').toString().trim().toUpperCase();
+					const distVal = cleanDistance(r[colMap.distance_km]);
+					const bibClean = cleanNumber(r[colMap.bib_number]);
+					const ageRaw = r[colMap.age];
+					const birthRaw = r[colMap.birth_date];
+
+					const { ageVal, birthVal } = parseAgeOrBirthDate(ageRaw, birthRaw);
+
+					if (!lastName || !firstName) {
+						badRows.push({
+							rowIndex: idx + 1,
+							reason: 'Falta nombre o apellido',
+							raw: r,
+						});
+						return;
+					}
+					if (!dni) {
+						badRows.push({
+							rowIndex: idx + 1,
+							reason: 'Falta DNI',
+							raw: r,
+						});
+						return;
+					}
+					if (!sex) {
+						badRows.push({
+							rowIndex: idx + 1,
+							reason: 'Falta sexo',
+							raw: r,
+						});
+						return;
+					}
+					if (distVal == null) {
+						badRows.push({
+							rowIndex: idx + 1,
+							reason: 'Falta distancia',
+							raw: r,
+						});
+						return;
+					}
+					if (ageVal == null && !birthVal) {
+						badRows.push({
+							rowIndex: idx + 1,
+							reason: 'Falta edad o fecha nacimiento (al menos una)',
+							raw: r,
+						});
+						return;
+					}
+
+					let bibNum: number | null = null;
+					if (bibClean !== '') {
+						const n = Number(bibClean);
+						if (Number.isFinite(n)) {
+							bibNum = n;
+						}
+					}
+
+					goodRows.push({
+						first_name: firstName,
+						last_name: lastName,
+						dni: dni,
+						sex: sex,
+						distance_km: distVal ?? 0,
+						bib_number: bibNum,
+						birth_date: birthVal || null,
+						age: ageVal ?? null,
+					});
+				});
+
+				setPreviewRows(goodRows);
+				setExcludedRows(badRows);
+			},
+			error: (err: any) => {
+				console.error('Papa parse error:', err);
+				setCsvErr('Error procesando el archivo.');
+			},
+		});
+	}
+
+	// ------------------------------
+	// Importar previewRows a Supabase
+	// ------------------------------
+	async function handleImportToSupabase() {
+		if (!race) return;
+		if (previewRows.length === 0) {
+			alert('No hay filas válidas para importar.');
 			return;
 		}
 
 		setImporting(true);
-		setImportErr('');
-		setFailedRows([]);
 
-		const newFailed: FailedImportRow[] = [];
-		let successCount = 0;
+		// Traer DNIs existentes
+		const { data: existing, error: exErr } = await supabase
+			.from('participants')
+			.select('dni')
+			.eq('race_id', race.id);
 
-		// para DNIs duplicados dentro del archivo
-		const seenThisBatch = new Set<string>();
+		if (exErr) {
+			console.error(exErr);
+			alert('No pude validar DNIs existentes.');
+			setImporting(false);
+			return;
+		}
 
-		for (const row of rawRows) {
-			// 1. Obtenemos crudo
-			const rawFirstName = row[mapFirstName];
-			const rawLastName = row[mapLastName];
-			const rawDni = row[mapDni];
-			const rawSex = row[mapSex];
-			const rawDistance = row[mapDistance];
-			const rawBib = row[mapBib];
-			const rawBirth = mapBirthDate ? row[mapBirthDate] : null;
-			const rawAge = mapAge ? row[mapAge] : null;
+		const dniSet = new Set((existing || []).map((row: any) => row.dni));
 
-			// 2. Limpiamos
-			const firstNameTrim = cleanName(rawFirstName);
-			const lastNameTrim = cleanName(rawLastName);
+		const rowsToInsert: any[] = [];
+		const newExcluded = [...excludedRows];
 
-			const dniClean = cleanDigits(rawDni);
-			const normSex = normalizeSex(rawSex);
-
-			const distanceSanitized = sanitizeDistanceRaw(rawDistance);
-			const distNum = extractNumberLike(distanceSanitized);
-
-			const bibDigits = cleanDigits(rawBib);
-			const bibNum = bibDigits && bibDigits !== '' ? Number(bibDigits) : null;
-
-			const birthISO = normalizeDate(rawBirth);
-			const finalAge = deriveAge(birthISO, cleanDigits(rawAge));
-
-			// 3. Validación dura
-			if (!firstNameTrim || !lastNameTrim) {
-				newFailed.push({
-					rowData: row,
-					errorMsg: 'Nombre o apellido vacío luego de limpiar espacios.',
+		for (const row of previewRows) {
+			if (dniSet.has(row.dni)) {
+				newExcluded.push({
+					rowIndex: -1,
+					reason: `DNI duplicado ${row.dni}`,
+					raw: row,
 				});
 				continue;
 			}
 
-			if (!dniClean) {
-				newFailed.push({
-					rowData: row,
-					errorMsg:
-						'DNI vacío/ inválido. Debe ser sólo números, sin puntos/comas.',
-				});
-				continue;
-			}
+			const age_snapshot = row.age != null ? row.age : null;
+			const final_age_snapshot = age_snapshot ?? 99;
 
-			if (existingDnis.has(dniClean)) {
-				newFailed.push({
-					rowData: row,
-					errorMsg: `DNI duplicado con la base existente (${dniClean}).`,
-				});
-				continue;
-			}
-			if (seenThisBatch.has(dniClean)) {
-				newFailed.push({
-					rowData: row,
-					errorMsg: `DNI repetido dentro del archivo (${dniClean}).`,
-				});
-				continue;
-			}
-			seenThisBatch.add(dniClean);
+			const chip = buildChipFromBib(row.bib_number);
 
-			if (!normSex) {
-				newFailed.push({
-					rowData: row,
-					errorMsg: 'Sexo vacío/no reconocido. Debe mapear a M/F/X/ALL.',
-				});
-				continue;
-			}
-
-			if (distNum === null) {
-				newFailed.push({
-					rowData: row,
-					errorMsg: 'Distancia inválida. Debe ser número (10, 21, etc.).',
-				});
-				continue;
-			}
-
-			if (bibNum === null || !Number.isFinite(bibNum)) {
-				newFailed.push({
-					rowData: row,
-					errorMsg: 'Dorsal inválido. Sólo números, sin puntos ni comas.',
-				});
-				continue;
-			}
-
-			const chipVal = makeChipFromBibNumberString(bibDigits);
-			if (!chipVal) {
-				newFailed.push({
-					rowData: row,
-					errorMsg: 'Dorsal inválido para chip (máx 5 dígitos).',
-				});
-				continue;
-			}
-
-			// 4. Construimos fila a insertar
-			const insertRow: any = {
+			rowsToInsert.push({
 				race_id: race.id,
-				first_name: firstNameTrim,
-				last_name: lastNameTrim,
-				dni: dniClean,
-				sex: normSex,
-				birth_date: birthISO,
-				age: finalAge,
-				distance_km: distNum,
-				bib_number: bibNum,
-				chip: chipVal,
-				category_id: null,
-				age_snapshot: finalAge ?? null,
-			};
-
-			// 5. Insert
-			const { error: insErr } = await supabase
-				.from('participants')
-				.insert([insertRow]);
-
-			if (insErr) {
-				console.error('Fila falló:', insErr, insertRow);
-				newFailed.push({
-					rowData: insertRow,
-					errorMsg:
-						insErr.message ||
-						'Supabase rechazó esta fila (constraint / formato).',
-				});
-			} else {
-				successCount++;
-				existingDnis.add(dniClean);
-			}
+				first_name: row.first_name,
+				last_name: row.last_name,
+				dni: row.dni,
+				sex: row.sex,
+				distance_km: row.distance_km,
+				bib_number: row.bib_number,
+				chip: chip,
+				birth_date: row.birth_date,
+				age: row.age,
+				status: 'registered',
+				age_snapshot: final_age_snapshot,
+			});
 		}
 
-		setFailedRows(newFailed);
+		setExcludedRows(newExcluded);
 
-		if (successCount === 0 && newFailed.length > 0) {
-			setImportErr(
-				'Ningún participante fue importado. Revisá las exclusiones listadas abajo.'
-			);
-		} else if (successCount > 0 && newFailed.length > 0) {
-			setImportErr(
-				`Se importaron ${successCount} participante(s). ${newFailed.length} fueron EXCLUIDOS (ver abajo).`
-			);
-		} else {
-			setImportErr(
-				`Se importaron ${successCount} participante(s) correctamente.`
-			);
+		if (rowsToInsert.length === 0) {
+			alert('No se generó ninguna fila válida. Todos duplicados o inválidos.');
+			setImporting(false);
+			return;
 		}
 
+		const { error: insErr } = await supabase
+			.from('participants')
+			.insert(rowsToInsert);
+
+		if (insErr) {
+			console.error('Supabase rechazó la importación masiva: ', insErr);
+			alert('Supabase rechazó la importación masiva.\nDetalles en consola.');
+			setImporting(false);
+			return;
+		}
+
+		await loadData();
 		setImporting(false);
-		loadData();
+		alert('Importación realizada.');
 	}
 
-	// ============================================================
-	//          FORMULARIO INDIVIDUAL (ALTA / EDICIÓN)
-	// ============================================================
-
+	// ------------------------------
+	// Alta/edición manual
+	// ------------------------------
 	function openNewParticipant() {
+		resetParticipantForm();
 		setEditMode('new');
+		setEditModalOpen(true);
+	}
+
+	function openEditParticipant(p: ParticipantRow) {
+		resetParticipantForm();
+		setEditMode('edit');
+		setEditId(p.id);
+
+		setFormFirstName(p.first_name || '');
+		setFormLastName(p.last_name || '');
+		setFormDni(p.dni || '');
+		setFormSex(p.sex || 'M');
+		setFormBirthDate(p.birth_date || '');
+		setFormAge(p.age != null ? String(p.age) : '');
+		setFormDistance(p.distance_km != null ? String(p.distance_km) : '');
+		setFormBib(p.bib_number != null ? String(p.bib_number) : '');
+		setFormStatus(p.status || 'registered');
+
+		setEditModalOpen(true);
+	}
+
+	function resetParticipantForm() {
 		setEditId(null);
 		setFormFirstName('');
 		setFormLastName('');
@@ -623,152 +659,130 @@ export default function ParticipantsPage({
 		setFormAge('');
 		setFormDistance('');
 		setFormBib('');
+		setFormStatus('registered');
 		setFormErr('');
-		setShowEditModal(true);
+		setSavingParticipant(false);
 	}
 
-	function openEditParticipant(p: ParticipantRow) {
-		setEditMode('edit');
-		setEditId(p.id);
-		setFormFirstName(p.first_name || '');
-		setFormLastName(p.last_name || '');
-		setFormDni(p.dni || '');
-		setFormSex(p.sex || 'M');
-		setFormBirthDate(p.birth_date || '');
-		setFormAge(p.age != null ? String(p.age) : '');
-		setFormDistance(p.distance_km != null ? String(p.distance_km) : '');
-		setFormBib(p.bib_number != null ? String(p.bib_number) : '');
-		setFormErr('');
-		setShowEditModal(true);
-	}
-
-	async function saveParticipantForm() {
+	async function handleSaveParticipant() {
 		if (!race) return;
-		setSavingForm(true);
+
+		setSavingParticipant(true);
 		setFormErr('');
 
-		// limpiamos con las mismas reglas
-		const firstNameTrim = cleanName(formFirstName);
-		const lastNameTrim = cleanName(formLastName);
+		const ln = cleanName(formLastName);
+		const fn = cleanName(formFirstName);
+		const dniC = cleanNumber(formDni);
+		const sx = formSex.trim().toUpperCase();
+		const distParsed = cleanDistance(formDistance);
+		let bibNum: number | null = null;
+		if (formBib !== '') {
+			const n = Number(cleanNumber(formBib));
+			if (Number.isFinite(n)) bibNum = n;
+		}
 
-		const dniClean = cleanDigits(formDni);
-		const normSex = normalizeSex(formSex);
-		const distanceSanitized = sanitizeDistanceRaw(formDistance);
-		const distNum = extractNumberLike(distanceSanitized);
-		const bibDigits = cleanDigits(formBib);
-		const bibNum = bibDigits && bibDigits !== '' ? Number(bibDigits) : null;
-		const birthISO = normalizeDate(formBirthDate || null);
-		const finalAge = deriveAge(birthISO, cleanDigits(formAge));
-		const chipVal = bibDigits ? makeChipFromBibNumberString(bibDigits) : null;
+		const { ageVal, birthVal } = parseAgeOrBirthDate(formAge, formBirthDate);
 
-		if (!firstNameTrim || !lastNameTrim) {
+		if (!ln || !fn) {
 			setFormErr('Nombre y Apellido son obligatorios.');
-			setSavingForm(false);
+			setSavingParticipant(false);
 			return;
 		}
-
-		if (!dniClean) {
+		if (!dniC) {
 			setFormErr('DNI es obligatorio.');
-			setSavingForm(false);
+			setSavingParticipant(false);
+			return;
+		}
+		if (!sx) {
+			setFormErr('Sexo es obligatorio.');
+			setSavingParticipant(false);
+			return;
+		}
+		if (distParsed == null) {
+			setFormErr('Distancia es obligatoria.');
+			setSavingParticipant(false);
+			return;
+		}
+		if (ageVal == null && !birthVal) {
+			setFormErr('Edad o Fecha de nacimiento (una).');
+			setSavingParticipant(false);
 			return;
 		}
 
-		if (!normSex) {
-			setFormErr('Sexo es obligatorio (M/F/X/ALL).');
-			setSavingForm(false);
-			return;
-		}
+		const chip = buildChipFromBib(bibNum);
+		const final_age_snapshot = ageVal != null ? ageVal : 99;
 
-		if (distNum === null) {
-			setFormErr('Distancia inválida.');
-			setSavingForm(false);
-			return;
-		}
-
-		if (bibNum === null || !Number.isFinite(bibNum)) {
-			setFormErr('Dorsal inválido.');
-			setSavingForm(false);
-			return;
-		}
-
-		if (!chipVal) {
-			setFormErr('No pude generar chip (dorsal muy largo?).');
-			setSavingForm(false);
-			return;
-		}
-
-		// chequeo dni duplicado si es alta nueva
-		if (editMode === 'new') {
-			if (existingDnis.has(dniClean)) {
-				setFormErr('Ya existe un corredor con ese DNI.');
-				setSavingForm(false);
-				return;
-			}
-		} else {
-			// modo edición, si cambiaste el DNI hay que ver si no choca con otro
-			// vamos a preguntar a supabase
-			const { data: otherDni } = await supabase
-				.from('participants')
-				.select('id,dni')
-				.eq('race_id', race.id)
-				.eq('dni', dniClean);
-
-			if (
-				otherDni &&
-				otherDni.length > 0 &&
-				otherDni.some((r: any) => r.id !== editId)
-			) {
-				setFormErr('Ese DNI ya está asignado a otro participante.');
-				setSavingForm(false);
-				return;
-			}
-		}
-
-		const rowToSave: any = {
+		const row: any = {
 			race_id: race.id,
-			first_name: firstNameTrim,
-			last_name: lastNameTrim,
-			dni: dniClean,
-			sex: normSex,
-			birth_date: birthISO,
-			age: finalAge,
-			distance_km: distNum,
+			last_name: ln,
+			first_name: fn,
+			dni: dniC,
+			sex: sx,
+			distance_km: distParsed,
 			bib_number: bibNum,
-			chip: chipVal,
-			age_snapshot: finalAge ?? null,
+			chip,
+			birth_date: birthVal,
+			age: ageVal ?? null,
+			age_snapshot: final_age_snapshot,
+			status: formStatus || 'registered',
 		};
 
-		let saveErr;
 		if (editMode === 'new') {
-			const { error } = await supabase.from('participants').insert([rowToSave]);
-			saveErr = error || null;
-		} else {
-			const { error } = await supabase
+			const { data: existingDni, error: exErr } = await supabase
 				.from('participants')
-				.update(rowToSave)
+				.select('id')
+				.eq('race_id', race.id)
+				.eq('dni', dniC)
+				.limit(1);
+
+			if (exErr) {
+				console.error(exErr);
+				setFormErr('Error validando duplicados de DNI.');
+				setSavingParticipant(false);
+				return;
+			}
+			if (existingDni && existingDni.length > 0) {
+				setFormErr('Ya existe un participante con ese DNI en esta carrera.');
+				setSavingParticipant(false);
+				return;
+			}
+
+			const { error: insErr } = await supabase
+				.from('participants')
+				.insert([row]);
+			if (insErr) {
+				console.error(insErr);
+				setFormErr('No pude crear el participante. Revisá los datos.');
+				setSavingParticipant(false);
+				return;
+			}
+		} else {
+			const { error: upErr } = await supabase
+				.from('participants')
+				.update(row)
 				.eq('id', editId)
 				.eq('race_id', race.id);
-			saveErr = error || null;
+
+			if (upErr) {
+				console.error(upErr);
+				setFormErr('No pude actualizar el participante. Revisá los datos.');
+				setSavingParticipant(false);
+				return;
+			}
 		}
 
-		if (saveErr) {
-			console.error(saveErr);
-			setFormErr(
-				saveErr.message || 'No se pudo guardar el participante en la base.'
-			);
-			setSavingForm(false);
-			return;
-		}
-
-		setShowEditModal(false);
-		setSavingForm(false);
-		loadData();
+		await loadData();
+		setEditModalOpen(false);
+		setSavingParticipant(false);
 	}
 
-	async function deleteParticipant(p: ParticipantRow) {
+	// ------------------------------
+	// Borrar participante
+	// ------------------------------
+	async function handleDeleteParticipant(p: ParticipantRow) {
 		if (!race) return;
 		const ok = window.confirm(
-			`Vas a borrar a ${p.first_name} ${p.last_name} (#${p.bib_number}). ¿Confirmás?`
+			`Vas a borrar a ${p.last_name}, ${p.first_name} (DNI ${p.dni}). ¿Confirmás?`
 		);
 		if (!ok) return;
 
@@ -787,18 +801,25 @@ export default function ParticipantsPage({
 		loadData();
 	}
 
-	// ============================================================
-	//          ASIGNACIÓN AUTOMÁTICA DE CATEGORÍAS
-	// ============================================================
-
+	// ------------------------------
+	// Recalcular categorías (auto-asignar category_id)
+	// ------------------------------
 	async function handleAssignCategories() {
 		if (!race) return;
 
-		// 1. Traer categorías activas de la carrera
-		const { data: cats, error: catErr } = await supabase
+		const { data: catsFresh, error: catErr } = await supabase
 			.from('categories')
 			.select(
-				'id,race_id,name,distance_km,sex_filter,age_min,age_max,is_active'
+				`
+          id,
+          race_id,
+          name,
+          distance_km,
+          sex_filter,
+          age_min,
+          age_max,
+          is_active
+        `
 			)
 			.eq('race_id', race.id)
 			.eq('is_active', true);
@@ -809,59 +830,44 @@ export default function ParticipantsPage({
 			return;
 		}
 
-		const categories = (cats || []) as CategoryRow[];
+		const activeCats = (catsFresh || []) as CategoryRow[];
 
-		// 2. Para cada participante local, decidir su categoría
 		for (const p of participants) {
-			if (
-				p.distance_km == null ||
-				!p.sex ||
-				(p.age == null && p.birth_date == null)
-			) {
-				// no tenemos la data necesaria, lo salteamos
+			if (p.distance_km == null || !p.sex || (p.age == null && !p.birth_date)) {
 				continue;
 			}
 
-			// edad efectiva: usamos p.age
-			const effectiveAge = p.age;
+			const effAge = p.age;
+			if (effAge == null) continue;
 
-			// buscamos todas las categorías que matcheen
-			const matching = categories.filter((c) => {
-				// distancia igual
-				if (c.distance_km == null) return false;
-				if (p.distance_km === null) return false;
-				if (Number(c.distance_km) !== Number(p.distance_km)) return false;
+			const matches = activeCats.filter((c) => {
+				if (
+					c.distance_km == null ||
+					Number(c.distance_km) !== Number(p.distance_km)
+				)
+					return false;
 
-				// sexo compatible
 				if (c.sex_filter !== 'ALL' && c.sex_filter !== p.sex) return false;
 
-				// edad dentro del rango
-				if (effectiveAge == null) return false;
-				if (c.age_min != null && effectiveAge < c.age_min) return false;
-				if (c.age_max != null && effectiveAge > c.age_max) return false;
+				if (c.age_min != null && effAge < c.age_min) return false;
+				if (c.age_max != null && effAge > c.age_max) return false;
 
 				return true;
 			});
 
-			if (matching.length === 0) {
-				// no hay match -> no tocamos category_id
-				continue;
-			}
+			if (matches.length === 0) continue;
 
-			// si hay varias, elegimos la "más específica":
-			// menor rango de edad (age_max-age_min)
-			let chosen = matching[0];
-			let chosenSpan = spanOf(chosen);
-			for (let i = 1; i < matching.length; i++) {
-				const s = spanOf(matching[i]);
-				if (s < chosenSpan) {
-					chosen = matching[i];
-					chosenSpan = s;
+			let chosen = matches[0];
+			let bestSpan = spanOf(matches[0]);
+			for (let i = 1; i < matches.length; i++) {
+				const span = spanOf(matches[i]);
+				if (span < bestSpan) {
+					chosen = matches[i];
+					bestSpan = span;
 				}
 			}
 
 			if (p.category_id !== chosen.id) {
-				// update en supabase
 				await supabase
 					.from('participants')
 					.update({ category_id: chosen.id })
@@ -870,8 +876,7 @@ export default function ParticipantsPage({
 			}
 		}
 
-		// refrescamos la data
-		loadData();
+		await loadData();
 
 		function spanOf(c: CategoryRow) {
 			const min = c.age_min ?? 0;
@@ -880,9 +885,9 @@ export default function ParticipantsPage({
 		}
 	}
 
-	// ============================================================
-	// RENDER
-	// ============================================================
+	// ------------------------------
+	// UI principal
+	// ------------------------------
 
 	if (loading && !race) {
 		return (
@@ -909,8 +914,8 @@ export default function ParticipantsPage({
 	}
 
 	return (
-		<main className='min-h-screen bg-neutral-950 text-white p-4 pb-24'>
-			{/* HEADER */}
+		<main className='min-h-screen bg-neutral-950 text-white p-4 pb-28'>
+			{/* HEADER / MIGAS */}
 			<div className='flex flex-col gap-1 mb-4'>
 				<div className='text-sm text-neutral-400 flex items-center gap-2 flex-wrap'>
 					<button
@@ -932,11 +937,13 @@ export default function ParticipantsPage({
 
 				<div className='min-w-0'>
 					<h1 className='text-2xl font-bold leading-tight break-words'>
-						Gestión de participantes
+						Participantes
 					</h1>
+
 					<div className='text-sm text-neutral-400'>
 						{race.date} · {race.location || 'Sin ubicación'}
 					</div>
+
 					<div className='text-[11px] text-neutral-500 mt-1'>
 						Estado:{' '}
 						<span
@@ -954,371 +961,550 @@ export default function ParticipantsPage({
 				</div>
 			</div>
 
-			{/* KPI + acciones */}
-			<div className='grid grid-cols-1 sm:grid-cols-4 gap-3 mb-6'>
-				<div className='rounded-xl border border-neutral-700 bg-neutral-900 p-4 flex flex-col col-span-1'>
-					<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
-						Total inscritos
+			{loadErr && (
+				<div className='text-red-400 text-sm bg-red-950/30 border border-red-700 rounded-lg px-3 py-2 mb-4'>
+					{loadErr}
+				</div>
+			)}
+
+			{/* KPIs RÁPIDOS */}
+			<div className='grid grid-cols-2 sm:grid-cols-5 gap-3 mb-6'>
+				<div className='bg-neutral-900 border border-neutral-700 rounded-xl p-3'>
+					<div className='text-[11px] text-neutral-500 uppercase tracking-wide'>
+						Total
 					</div>
-					<div className='text-3xl font-bold text-white leading-none'>
-						{totalCount}
+					<div className='text-2xl font-semibold text-white'>{totalCount}</div>
+				</div>
+
+				<div className='bg-neutral-900 border border-neutral-700 rounded-xl p-3'>
+					<div className='text-[11px] text-neutral-500 uppercase tracking-wide'>
+						Con categoría
 					</div>
-					<div className='text-[10px] text-neutral-500 mt-1'>
-						Corredores cargados
+					<div className='text-2xl font-semibold text-emerald-400'>
+						{totalWithCategory}
 					</div>
 				</div>
 
-				<div className='rounded-xl border border-neutral-700 bg-neutral-900 p-4 flex flex-col col-span-1'>
-					<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
-						Por distancia
+				<div className='bg-neutral-900 border border-neutral-700 rounded-xl p-3'>
+					<div className='text-[11px] text-neutral-500 uppercase tracking-wide'>
+						Sin categoría
 					</div>
-					<div className='text-[12px] text-neutral-200 leading-tight flex flex-col gap-1 mt-2'>
-						{Object.keys(countByDistance).length === 0 ? (
-							<div className='text-neutral-500 text-[11px]'>Sin datos</div>
-						) : (
-							Object.entries(countByDistance).map(([dist, cnt]) => (
-								<div key={dist} className='flex justify-between text-[12px]'>
-									<span className='text-neutral-400'>
-										{dist === 'SIN_DIST' ? '— km' : `${dist}K`}
-									</span>
-									<span className='text-white font-semibold'>{cnt}</span>
-								</div>
-							))
-						)}
-					</div>
-					<div className='text-[10px] text-neutral-500 mt-2'>
-						distance_km asignada
+					<div className='text-2xl font-semibold text-red-400'>
+						{totalWithoutCategory}
 					</div>
 				</div>
 
-				<div className='rounded-xl border border-neutral-700 bg-neutral-900 p-4 flex flex-col col-span-1'>
-					<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
+				<div className='bg-neutral-900 border border-neutral-700 rounded-xl p-3'>
+					<div className='text-[11px] text-neutral-500 uppercase tracking-wide'>
 						Por sexo
 					</div>
-					<div className='text-[12px] text-neutral-200 leading-tight flex flex-col gap-1 mt-2'>
-						{Object.keys(countBySex).length === 0 ? (
-							<div className='text-neutral-500 text-[11px]'>Sin datos</div>
-						) : (
-							Object.entries(countBySex).map(([sx, cnt]) => (
-								<div key={sx} className='flex justify-between text-[12px]'>
-									<span className='text-neutral-400'>
-										{sx === 'SIN_SEXO' ? '—' : sx}
-									</span>
-									<span className='text-white font-semibold'>{cnt}</span>
-								</div>
-							))
-						)}
-					</div>
-					<div className='text-[10px] text-neutral-500 mt-2'>
-						M / F / X / ALL
+					<div className='text-[12px] text-neutral-200 leading-tight flex flex-col gap-1 mt-1'>
+						{Object.keys(countBySex).map((sx) => (
+							<div key={sx} className='flex justify-between'>
+								<span className='text-neutral-400'>{sx}</span>
+								<span className='text-white font-semibold'>
+									{countBySex[sx]}
+								</span>
+							</div>
+						))}
 					</div>
 				</div>
 
-				<div className='rounded-xl border border-neutral-700 bg-neutral-900 p-4 flex flex-col justify-between col-span-1'>
-					<div>
-						<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
-							Acciones rápidas
-						</div>
-						<div className='text-[10px] text-neutral-500 leading-tight mt-1'>
-							Asignar categoría por reglas (edad, sexo, distancia)
-						</div>
+				<div className='bg-neutral-900 border border-neutral-700 rounded-xl p-3 col-span-2 sm:col-span-1'>
+					<div className='text-[11px] text-neutral-500 uppercase tracking-wide'>
+						Por distancia (km)
 					</div>
-					<button
-						className='mt-3 w-full bg-blue-600 text-white font-semibold text-xs px-3 py-2 rounded-lg active:scale-95'
-						onClick={handleAssignCategories}
-					>
-						Recalcular categorías
-					</button>
+					<div className='text-[12px] text-neutral-200 leading-tight flex flex-col gap-1 mt-1 max-h-24 overflow-y-auto pr-1'>
+						{Object.keys(countByDistance).map((dist) => (
+							<div key={dist} className='flex justify-between'>
+								<span className='text-neutral-400'>{dist}K</span>
+								<span className='text-white font-semibold'>
+									{countByDistance[dist]}
+								</span>
+							</div>
+						))}
+					</div>
 				</div>
 			</div>
 
-			{/* BUSCADOR + BOTONES */}
-			<div className='border border-neutral-700 bg-neutral-900 rounded-xl p-4 mb-6 flex flex-col gap-4'>
-				<div className='flex flex-col sm:flex-row sm:items-end gap-4'>
-					<div className='flex-1'>
-						<label className='text-sm text-neutral-300'>
-							Buscar participante
-						</label>
+			{/* ACCIONES ADMIN */}
+			<div className='grid grid-cols-1 lg:grid-cols-2 gap-6 mb-10'>
+				{/* BLOQUE IMPORTACIÓN */}
+				<div className='bg-neutral-900 border border-neutral-700 rounded-xl p-4 space-y-4'>
+					<div className='flex justify-between items-start'>
+						<div>
+							<div className='text-lg font-semibold text-white'>
+								Importar planilla
+							</div>
+							<div className='text-[11px] text-neutral-500 leading-tight'>
+								Sube un CSV (Excel → CSV). Mapeá las columnas. Procesá. Luego
+								importá en la base.
+							</div>
+						</div>
+					</div>
+
+					{csvErr && (
+						<div className='text-red-400 text-sm bg-red-950/30 border border-red-700 rounded-lg px-3 py-2'>
+							{csvErr}
+						</div>
+					)}
+
+					<div className='flex flex-col gap-3 text-[13px]'>
 						<input
-							className='w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm mt-1'
-							placeholder='Apellido, nombre o DNI'
-							value={searchQ}
-							onChange={(e) => setSearchQ(e.target.value)}
+							type='file'
+							accept='.csv,text/csv'
+							className='text-[12px] text-neutral-300'
+							onChange={handleFileChange}
 						/>
-						<div className='text-[10px] text-neutral-500 mt-1'>
-							Filtra la tabla de abajo. Cliente en vivo, no llama a la base.
-						</div>
-					</div>
 
-					<div className='flex flex-col gap-2 w-full sm:w-auto'>
-						<button
-							className='bg-emerald-600 text-white font-semibold text-sm px-4 py-2 rounded-lg active:scale-95'
-							onClick={openNewParticipant}
-						>
-							+ Nuevo participante
-						</button>
-
-						<div className='text-[10px] text-neutral-500 text-center sm:text-left'>
-							Alta manual / cargar 1 corredor
-						</div>
-					</div>
-				</div>
-
-				{/* IMPORTADOR MASIVO */}
-				<div className='flex flex-col gap-3 border border-neutral-700 rounded-lg p-3 bg-neutral-800/30'>
-					<div className='flex flex-col sm:flex-row sm:justify-between sm:items-start gap-3'>
-						<div className='flex flex-col gap-1'>
-							<div className='text-neutral-300 text-sm font-semibold'>
-								Importar desde Excel / CSV
-							</div>
-							<div className='text-[11px] text-neutral-400 leading-tight'>
-								Obligatorio por fila: Nombre, Apellido, DNI, Sexo, Distancia,
-								Dorsal. El DNI no se puede repetir. Generamos el chip
-								automáticamente.
-							</div>
-						</div>
-
-						<div className='shrink-0'>
-							<input
-								ref={fileInputRef}
-								type='file'
-								accept='.csv, .xls, .xlsx'
-								className='text-[11px] text-neutral-300 file:bg-neutral-800 file:border file:border-neutral-600 file:rounded-lg file:px-2 file:py-1 file:text-[11px] file:text-neutral-200 file:mr-2 file:cursor-pointer'
-								onChange={handleFile}
+						{/* Mapeo de columnas */}
+						<div className='grid grid-cols-2 gap-2'>
+							<ColumnMapper
+								label='Apellido'
+								value={colMap.last_name}
+								onChange={(v) => setColMap({ ...colMap, last_name: v })}
+							/>
+							<ColumnMapper
+								label='Nombre'
+								value={colMap.first_name}
+								onChange={(v) => setColMap({ ...colMap, first_name: v })}
+							/>
+							<ColumnMapper
+								label='DNI'
+								value={colMap.dni}
+								onChange={(v) => setColMap({ ...colMap, dni: v })}
+							/>
+							<ColumnMapper
+								label='Sexo'
+								value={colMap.sex}
+								onChange={(v) => setColMap({ ...colMap, sex: v })}
+							/>
+							<ColumnMapper
+								label='Distancia (km)'
+								value={colMap.distance_km}
+								onChange={(v) => setColMap({ ...colMap, distance_km: v })}
+							/>
+							<ColumnMapper
+								label='Dorsal'
+								value={colMap.bib_number}
+								onChange={(v) => setColMap({ ...colMap, bib_number: v })}
+							/>
+							<ColumnMapper
+								label='Fecha nacimiento'
+								value={colMap.birth_date}
+								onChange={(v) => setColMap({ ...colMap, birth_date: v })}
+							/>
+							<ColumnMapper
+								label='Edad'
+								value={colMap.age}
+								onChange={(v) => setColMap({ ...colMap, age: v })}
 							/>
 						</div>
+
+						<button
+							className='bg-neutral-800 border border-neutral-600 rounded-lg px-3 py-2 text-[13px] text-white active:scale-95'
+							onClick={handleProcessFile}
+						>
+							1) Procesar archivo
+						</button>
+
+						{previewRows.length > 0 && (
+							<div className='text-[11px] text-neutral-400'>
+								{previewRows.length} filas válidas listas para importar.
+							</div>
+						)}
+
+						{excludedRows.length > 0 && (
+							<div className='bg-red-950/20 border border-red-700 rounded-lg p-2 max-h-40 overflow-y-auto'>
+								<div className='text-[11px] text-red-400 font-semibold'>
+									Filas excluidas ({excludedRows.length}):
+								</div>
+								<ul className='text-[11px] text-red-400 leading-tight mt-1 space-y-1'>
+									{excludedRows.map((ex, i) => (
+										<li key={i}>
+											#{ex.rowIndex}: {ex.reason}
+										</li>
+									))}
+								</ul>
+							</div>
+						)}
+
+						<button
+							className='bg-emerald-600 text-white rounded-lg px-3 py-2 text-[13px] font-semibold active:scale-95 disabled:opacity-50'
+							disabled={importing || previewRows.length === 0}
+							onClick={handleImportToSupabase}
+						>
+							{importing ? 'Importando...' : '2) Importar en Supabase'}
+						</button>
+
+						<div className='text-[10px] text-neutral-500 leading-tight'>
+							Reglas automáticas:
+							<ul className='list-disc list-inside'>
+								<li>DNI no se puede repetir en la misma carrera</li>
+								<li>chip = "LT" + dorsal padded (00123)</li>
+								<li>age_snapshot se setea con edad o default 99</li>
+							</ul>
+						</div>
+					</div>
+				</div>
+
+				{/* BLOQUE GESTIÓN / BUSCAR / EDITAR */}
+				<div className='bg-neutral-900 border border-neutral-700 rounded-xl p-4 space-y-4'>
+					<div className='flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3'>
+						<div>
+							<div className='text-lg font-semibold text-white'>
+								Gestión manual
+							</div>
+							<div className='text-[11px] text-neutral-500 leading-tight'>
+								Alta, edición, baja y recálculo de categoría.
+							</div>
+						</div>
+						<div className='flex-shrink-0'>
+							<button
+								className='bg-emerald-600 text-white text-[13px] font-semibold rounded-lg px-3 py-2 active:scale-95'
+								onClick={openNewParticipant}
+							>
+								+ Nuevo participante
+							</button>
+						</div>
 					</div>
 
-					{importErr && (
-						<div className='text-sm font-medium text-neutral-200 bg-neutral-800 border border-neutral-600 rounded-lg px-3 py-2'>
-							{importErr}
+					<div className='grid gap-3 text-[13px]'>
+						{/* Buscador */}
+						<div className='flex flex-col'>
+							<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
+								Buscar (apellido, nombre, DNI, dorsal)
+							</div>
+							<input
+								className='rounded-lg bg-neutral-800 border border-neutral-600 px-2 py-2 text-[13px] text-white'
+								value={searchTerm}
+								onChange={(e) => setSearchTerm(e.target.value)}
+								placeholder='Ej: GARCIA / 30111222 / 154'
+							/>
 						</div>
-					)}
 
-					{/* Paso mapeo */}
-					{importStep !== 'idle' && (
-						<div className='border border-neutral-700 rounded-lg p-3 bg-neutral-900 flex flex-col gap-3'>
-							<div className='text-white text-sm font-semibold'>
-								Mapeo de columnas
-							</div>
-							<div className='text-[11px] text-neutral-400 leading-tight'>
-								DNI sin puntos/comas/espacios. Distancia sólo número. Dorsal
-								sólo número. Si hay Edad o Fecha nac., calculamos edad.
-							</div>
+						<button
+							className='bg-blue-600 text-white rounded-lg px-3 py-2 text-[13px] font-semibold active:scale-95'
+							onClick={handleAssignCategories}
+						>
+							Recalcular categorías
+						</button>
 
-							<div className='grid grid-cols-2 gap-3 text-[13px] text-white'>
-								<SelectMap
-									label='Nombre *'
-									value={mapFirstName}
-									setValue={setMapFirstName}
-									headers={rawHeaders}
-								/>
-								<SelectMap
-									label='Apellido *'
-									value={mapLastName}
-									setValue={setMapLastName}
-									headers={rawHeaders}
-								/>
-								<SelectMap
-									label='DNI *'
-									value={mapDni}
-									setValue={setMapDni}
-									headers={rawHeaders}
-									hint='Se limpia: sólo dígitos'
-								/>
-								<SelectMap
-									label='Sexo *'
-									value={mapSex}
-									setValue={setMapSex}
-									headers={rawHeaders}
-									hint='M / F / X / ALL'
-								/>
-								<SelectMap
-									label='Fecha nacimiento'
-									value={mapBirthDate}
-									setValue={setMapBirthDate}
-									headers={rawHeaders}
-								/>
-								<SelectMap
-									label='Edad'
-									value={mapAge}
-									setValue={setMapAge}
-									headers={rawHeaders}
-									hint='Sólo número'
-								/>
-								<SelectMap
-									label='Distancia (km) *'
-									value={mapDistance}
-									setValue={setMapDistance}
-									headers={rawHeaders}
-									hint='Ej: "21", "21K", "21 km"'
-								/>
-								<SelectMap
-									label='Dorsal *'
-									value={mapBib}
-									setValue={setMapBib}
-									headers={rawHeaders}
-									hint='Sólo número'
-								/>
-							</div>
-
-							{importStep === 'mapped' && (
-								<button
-									className='w-full bg-blue-600 text-white font-semibold text-base px-4 py-3 rounded-lg active:scale-95'
-									onClick={validateMappingAndPrepare}
-								>
-									Validar mapeo
-								</button>
-							)}
-
-							{importStep === 'ready' && (
-								<button
-									className='w-full bg-emerald-600 text-white font-semibold text-base px-4 py-3 rounded-lg active:scale-95 disabled:opacity-50 disabled:active:scale-100'
-									disabled={importing}
-									onClick={handleImportToSupabase}
-								>
-									{importing ? 'Importando...' : 'Importar a la carrera'}
-								</button>
-							)}
+						<div className='text-[10px] text-neutral-500 leading-tight'>
+							Usa las categorías ACTIVAS de esta carrera. Match por distancia,
+							sexo y rango de edad. Si no tiene edad o distancia, no se asigna.
 						</div>
-					)}
+					</div>
 
-					{/* Filas excluidas */}
-					{failedRows.length > 0 && (
-						<div className='border border-red-700 bg-red-950/30 rounded-lg p-3 flex flex-col gap-2'>
-							<div className='text-red-400 text-sm font-semibold'>
-								Participantes EXCLUIDOS ({failedRows.length})
-							</div>
-							<div className='text-[11px] text-red-300 leading-tight'>
-								Estas filas NO se cargaron. Motivo a la vista (DNI duplicado,
-								distancia inválida, dorsal mal formateado, etc.). Corregí y
-								reintentá sólo con ellos.
-							</div>
-
-							<div className='max-h-48 overflow-y-auto text-[11px] text-neutral-200 bg-neutral-900 border border-neutral-700 rounded p-2'>
-								{failedRows.map((f, idx) => (
-									<div
-										key={idx}
-										className='border-b border-neutral-700 pb-2 mb-2 last:mb-0 last:pb-0 last:border-b-0'
-									>
-										<div className='text-red-400 font-semibold'>
-											{f.errorMsg}
-										</div>
-										<div className='text-neutral-400 break-words'>
-											{JSON.stringify(f.rowData)}
-										</div>
-									</div>
-								))}
-							</div>
-						</div>
-					)}
-				</div>
-			</div>
-
-			{/* LISTADO PARTICIPANTES */}
-			<div className='border border-neutral-700 bg-neutral-900 rounded-xl overflow-hidden'>
-				<div className='overflow-x-auto'>
-					<table className='min-w-full text-left text-sm text-neutral-200'>
-						<thead className='bg-neutral-800 text-[11px] uppercase text-neutral-400'>
-							<tr>
-								<th className='px-3 py-2 whitespace-nowrap'>Dorsal</th>
-								<th className='px-3 py-2 whitespace-nowrap'>Chip</th>
-								<th className='px-3 py-2 whitespace-nowrap'>Nombre</th>
-								<th className='px-3 py-2 whitespace-nowrap'>DNI</th>
-								<th className='px-3 py-2 whitespace-nowrap'>Sexo</th>
-								<th className='px-3 py-2 whitespace-nowrap'>Edad</th>
-								<th className='px-3 py-2 whitespace-nowrap'>Dist</th>
-								<th className='px-3 py-2 whitespace-nowrap text-right'>
-									Acciones
-								</th>
-							</tr>
-						</thead>
-						<tbody>
-							{filteredParticipants.length === 0 ? (
+					{/* Tabla resumida de búsqueda */}
+					<div className='border border-neutral-700 bg-neutral-950 rounded-xl overflow-hidden max-h-64 overflow-y-auto'>
+						<table className='min-w-full text-left text-sm text-neutral-200'>
+							<thead className='bg-neutral-800 text-[11px] uppercase text-neutral-400'>
 								<tr>
-									<td
-										colSpan={8}
-										className='px-3 py-4 text-center text-neutral-500 text-[12px]'
-									>
-										Sin participantes para este filtro.
-									</td>
+									<th className='px-3 py-2 whitespace-nowrap'>
+										Apellido, Nombre
+									</th>
+									<th className='px-3 py-2 whitespace-nowrap'>DNI</th>
+									<th className='px-3 py-2 whitespace-nowrap'>Dist</th>
+									<th className='px-3 py-2 whitespace-nowrap'>Dorsal</th>
+									<th className='px-3 py-2 whitespace-nowrap'>Cat.</th>
+									<th className='px-3 py-2 whitespace-nowrap text-right'>
+										Acciones
+									</th>
 								</tr>
-							) : (
-								filteredParticipants.map((p, idx) => (
-									<tr
-										key={p.id}
-										className={
-											idx % 2 === 0 ? 'bg-neutral-900' : 'bg-neutral-950/40'
-										}
-									>
-										<td className='px-3 py-2 text-white font-semibold text-[13px]'>
-											{p.bib_number != null ? `#${p.bib_number}` : '—'}
-										</td>
-
-										<td className='px-3 py-2 text-[13px] text-neutral-300 font-mono'>
-											{p.chip || '—'}
-										</td>
-
-										<td className='px-3 py-2'>
-											<div className='text-white text-[13px] font-semibold leading-tight'>
-												{p.first_name} {p.last_name}
-											</div>
-											<div className='text-[10px] text-neutral-500 leading-tight'>
-												{p.birth_date
-													? `Nac: ${p.birth_date}`
-													: p.age != null
-													? `Edad: ${p.age}`
-													: ''}
-											</div>
-										</td>
-
-										<td className='px-3 py-2 text-[13px] text-neutral-300'>
-											{p.dni ?? '—'}
-										</td>
-
-										<td className='px-3 py-2 text-[13px] text-neutral-300'>
-											{p.sex || '—'}
-										</td>
-
-										<td className='px-3 py-2 text-[13px] text-neutral-300'>
-											{p.age != null ? p.age : '—'}
-										</td>
-
-										<td className='px-3 py-2 text-[13px] text-neutral-300'>
-											{p.distance_km != null ? `${p.distance_km}K` : '—'}
-										</td>
-
-										<td className='px-3 py-2 text-right text-[13px] text-neutral-300'>
-											<button
-												className='text-emerald-400 underline text-[12px] mr-3'
-												onClick={() => openEditParticipant(p)}
-											>
-												Editar
-											</button>
-											<button
-												className='text-red-400 underline text-[12px]'
-												onClick={() => deleteParticipant(p)}
-											>
-												Borrar
-											</button>
+							</thead>
+							<tbody>
+								{filteredParticipants.length === 0 ? (
+									<tr>
+										<td
+											colSpan={6}
+											className='px-3 py-4 text-center text-neutral-500 text-[12px]'
+										>
+											Sin resultados.
 										</td>
 									</tr>
-								))
-							)}
-						</tbody>
-					</table>
-				</div>
+								) : (
+									filteredParticipants.map((p, idx) => (
+										<tr
+											key={p.id}
+											className={
+												idx % 2 === 0 ? 'bg-neutral-900' : 'bg-neutral-950/40'
+											}
+										>
+											<td className='px-3 py-2 text-[13px] text-white font-semibold leading-tight'>
+												{p.last_name}, {p.first_name}
+												<div className='text-[10px] text-neutral-500 leading-tight'>
+													#{p.id}
+												</div>
+											</td>
+											<td className='px-3 py-2 text-[13px] text-neutral-300'>
+												{p.dni}
+											</td>
+											<td className='px-3 py-2 text-[13px] text-neutral-300'>
+												{p.distance_km != null ? `${p.distance_km}K` : '—'}
+											</td>
+											<td className='px-3 py-2 text-[13px] text-neutral-300'>
+												{p.bib_number ?? '—'}
+											</td>
+											<td className='px-3 py-2 text-[13px] text-neutral-300'>
+												{p.category && p.category.name ? p.category.name : '—'}
+											</td>
+											<td className='px-3 py-2 text-right text-[13px] text-neutral-300'>
+												<button
+													className='text-emerald-400 underline text-[12px] mr-3'
+													onClick={() => openEditParticipant(p)}
+												>
+													Editar
+												</button>
+												<button
+													className='text-red-400 underline text-[12px]'
+													onClick={() => handleDeleteParticipant(p)}
+												>
+													Borrar
+												</button>
+											</td>
+										</tr>
+									))
+								)}
+							</tbody>
+						</table>
+					</div>
 
-				<div className='p-3 text-[10px] text-neutral-500 border-t border-neutral-800'>
-					Estos datos son los guardados en Supabase. Si corregís algo manual,
-					guardá y luego podés volver a “Recalcular categorías”.
+					<div className='text-[10px] text-neutral-500 leading-tight'>
+						Edición manual te deja corregir edad, distancia, dorsal, etc. O
+						borrar inscriptos cargados de más.
+					</div>
 				</div>
 			</div>
 
-			{/* MODAL ALTA / EDICIÓN */}
-			{showEditModal && (
-				<div className='fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4'>
-					<div className='w-full max-w-md bg-neutral-900 border border-neutral-700 rounded-2xl p-4 text-white'>
+			{/* =============================== */}
+			{/* NUEVA SECCIÓN: ALERTA SIN CATEGORÍA */}
+			{/* =============================== */}
+			<section className='mb-10'>
+				<div className='bg-neutral-900 border border-neutral-700 rounded-xl overflow-hidden'>
+					<div className='bg-neutral-800 px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2'>
+						<div>
+							<div className='text-white font-semibold text-[14px] leading-tight flex items-center gap-2'>
+								Sin categoría asignada
+								<span className='text-red-400 text-[12px] font-normal'>
+									({unassignedParticipants.length})
+								</span>
+							</div>
+							<div className='text-[11px] text-neutral-400 leading-tight'>
+								Participantes que todavía no matchean con ninguna categoría
+								(edad/distancia/sexo).
+							</div>
+						</div>
+						<div className='flex-shrink-0 flex items-center gap-2'>
+							<button
+								className='bg-blue-600 text-white text-[12px] font-semibold rounded-lg px-3 py-2 active:scale-95'
+								onClick={handleAssignCategories}
+							>
+								Asignar categorías ahora
+							</button>
+						</div>
+					</div>
+
+					<div className='overflow-x-auto max-h-64 overflow-y-auto'>
+						<table className='min-w-full text-left text-sm text-neutral-200'>
+							<thead className='bg-neutral-800 text-[11px] uppercase text-neutral-400'>
+								<tr>
+									<th className='px-3 py-2 whitespace-nowrap'>
+										Apellido, Nombre
+									</th>
+									<th className='px-3 py-2 whitespace-nowrap'>DNI</th>
+									<th className='px-3 py-2 whitespace-nowrap'>Sexo</th>
+									<th className='px-3 py-2 whitespace-nowrap'>Edad</th>
+									<th className='px-3 py-2 whitespace-nowrap'>Dist</th>
+									<th className='px-3 py-2 whitespace-nowrap'>Dorsal</th>
+									<th className='px-3 py-2 whitespace-nowrap text-right'>
+										Acciones
+									</th>
+								</tr>
+							</thead>
+							<tbody>
+								{unassignedParticipants.length === 0 ? (
+									<tr>
+										<td
+											colSpan={7}
+											className='px-3 py-4 text-center text-neutral-500 text-[12px]'
+										>
+											Todos tienen categoría asignada.
+										</td>
+									</tr>
+								) : (
+									unassignedParticipants.map((p, idx) => (
+										<tr
+											key={p.id}
+											className={
+												idx % 2 === 0 ? 'bg-neutral-900' : 'bg-neutral-950/40'
+											}
+										>
+											<td className='px-3 py-2 text-[13px] text-white font-semibold leading-tight'>
+												{p.last_name}, {p.first_name}
+												<div className='text-[10px] text-neutral-500 leading-tight'>
+													#{p.id}
+												</div>
+											</td>
+											<td className='px-3 py-2 text-[13px] text-neutral-300'>
+												{p.dni}
+											</td>
+											<td className='px-3 py-2 text-[13px] text-neutral-300'>
+												{p.sex}
+											</td>
+											<td className='px-3 py-2 text-[13px] text-neutral-300'>
+												{p.age != null ? p.age : '—'}
+											</td>
+											<td className='px-3 py-2 text-[13px] text-neutral-300'>
+												{p.distance_km != null ? `${p.distance_km}K` : '—'}
+											</td>
+											<td className='px-3 py-2 text-[13px] text-neutral-300'>
+												{p.bib_number ?? '—'}
+											</td>
+											<td className='px-3 py-2 text-right text-[13px] text-neutral-300'>
+												<button
+													className='text-emerald-400 underline text-[12px] mr-3'
+													onClick={() => openEditParticipant(p)}
+												>
+													Editar
+												</button>
+												<button
+													className='text-red-400 underline text-[12px]'
+													onClick={() => handleDeleteParticipant(p)}
+												>
+													Borrar
+												</button>
+											</td>
+										</tr>
+									))
+								)}
+							</tbody>
+						</table>
+					</div>
+
+					<div className='px-4 py-2 text-[10px] text-neutral-500 border-t border-neutral-800'>
+						Revisá edad, sexo y distancia. Sin eso no vamos a poder premiar ni
+						publicar resultados.
+					</div>
+				</div>
+			</section>
+
+			{/* =============================== */}
+			{/* VISTA AGRUPADA POR CATEGORÍA (PODIO / PREMIACIÓN) */}
+			{/* =============================== */}
+			<section className='mb-24'>
+				<h2 className='text-xl font-semibold text-white mb-2'>
+					Participantes por categoría
+				</h2>
+				<div className='text-[11px] text-neutral-500 leading-tight mb-4'>
+					Vista operativa para premiación / podio. Agrupado por categoría
+					asignada. Ordenado por dorsal.
+				</div>
+
+				{Object.keys(participantsByCategory).length === 0 ? (
+					<div className='text-neutral-500 text-[12px]'>
+						No hay participantes cargados.
+					</div>
+				) : (
+					Object.keys(participantsByCategory)
+						.sort((a, b) => {
+							// "Sin categoría" al final
+							if (a === 'Sin categoría' && b !== 'Sin categoría') return 1;
+							if (b === 'Sin categoría' && a !== 'Sin categoría') return -1;
+							return a.localeCompare(b);
+						})
+						.map((catName) => {
+							const list = participantsByCategory[catName];
+
+							return (
+								<div
+									key={catName}
+									className='mb-6 bg-neutral-900 border border-neutral-700 rounded-xl overflow-hidden'
+								>
+									<div className='bg-neutral-800 px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2'>
+										<div>
+											<div className='text-white font-semibold text-[14px] leading-tight'>
+												{catName}
+											</div>
+											<div className='text-[11px] text-neutral-400 leading-tight'>
+												{list.length} participante
+												{list.length === 1 ? '' : 's'}
+											</div>
+										</div>
+									</div>
+
+									<div className='overflow-x-auto'>
+										<table className='min-w-full text-left text-sm text-neutral-200'>
+											<thead className='bg-neutral-800 text-[11px] uppercase text-neutral-400'>
+												<tr>
+													<th className='px-3 py-2 whitespace-nowrap'>#</th>
+													<th className='px-3 py-2 whitespace-nowrap'>
+														Dorsal
+													</th>
+													<th className='px-3 py-2 whitespace-nowrap'>
+														Apellido, Nombre
+													</th>
+													<th className='px-3 py-2 whitespace-nowrap'>DNI</th>
+													<th className='px-3 py-2 whitespace-nowrap'>Sexo</th>
+													<th className='px-3 py-2 whitespace-nowrap'>Edad</th>
+													<th className='px-3 py-2 whitespace-nowrap'>
+														Distancia
+													</th>
+												</tr>
+											</thead>
+											<tbody>
+												{list.map((p, idx) => (
+													<tr
+														key={p.id}
+														className={
+															idx % 2 === 0
+																? 'bg-neutral-900'
+																: 'bg-neutral-950/40'
+														}
+													>
+														<td className='px-3 py-2 text-[13px] text-neutral-400'>
+															{idx + 1}
+														</td>
+														<td className='px-3 py-2 text-[13px] text-white font-semibold'>
+															{p.bib_number ?? '—'}
+														</td>
+														<td className='px-3 py-2 text-[13px] text-neutral-200'>
+															{p.last_name}, {p.first_name}
+														</td>
+														<td className='px-3 py-2 text-[13px] text-neutral-300'>
+															{p.dni}
+														</td>
+														<td className='px-3 py-2 text-[13px] text-neutral-300'>
+															{p.sex}
+														</td>
+														<td className='px-3 py-2 text-[13px] text-neutral-300'>
+															{p.age != null ? p.age : '—'}
+														</td>
+														<td className='px-3 py-2 text-[13px] text-neutral-300'>
+															{p.distance_km != null
+																? `${p.distance_km}K`
+																: '—'}
+														</td>
+													</tr>
+												))}
+											</tbody>
+										</table>
+									</div>
+
+									<div className='px-4 py-2 text-[10px] text-neutral-500 border-t border-neutral-800'>
+										Nota operativa: cuando tengamos tiempos finales, acá vamos a
+										poder listar posiciones y podio.
+									</div>
+								</div>
+							);
+						})
+				)}
+			</section>
+
+			{/* MODAL ALTA / EDICIÓN PARTICIPANTE */}
+			{editModalOpen && (
+				<div className='fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 overflow-y-auto'>
+					<div className='w-full max-w-lg bg-neutral-900 border border-neutral-700 rounded-2xl p-4 text-white'>
 						<div className='flex items-start justify-between mb-3'>
 							<div>
 								<div className='text-lg font-semibold'>
@@ -1327,13 +1513,13 @@ export default function ParticipantsPage({
 										: 'Editar participante'}
 								</div>
 								<div className='text-[11px] text-neutral-500 leading-tight'>
-									Obligatorios: Nombre, Apellido, DNI, Sexo, Distancia, Dorsal.
+									DNI único por carrera. Edad o Fecha de nacimiento obligatoria.
 								</div>
 							</div>
 							<button
 								className='text-neutral-400 text-sm'
 								onClick={() => {
-									if (!savingForm) setShowEditModal(false);
+									if (!savingParticipant) setEditModalOpen(false);
 								}}
 							>
 								✕
@@ -1347,22 +1533,39 @@ export default function ParticipantsPage({
 						)}
 
 						<div className='grid grid-cols-2 gap-3 text-[13px]'>
-							<FieldEdit
-								label='Nombre *'
-								value={formFirstName}
-								onChange={setFormFirstName}
-							/>
-							<FieldEdit
-								label='Apellido *'
-								value={formLastName}
-								onChange={setFormLastName}
-							/>
-							<FieldEdit
-								label='DNI *'
-								value={formDni}
-								onChange={setFormDni}
-								hint='Sólo dígitos'
-							/>
+							<div className='flex flex-col'>
+								<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
+									Apellido *
+								</div>
+								<input
+									className='rounded-lg bg-neutral-800 border border-neutral-600 px-2 py-2 text-[13px] text-white'
+									value={formLastName}
+									onChange={(e) => setFormLastName(e.target.value)}
+								/>
+							</div>
+
+							<div className='flex flex-col'>
+								<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
+									Nombre *
+								</div>
+								<input
+									className='rounded-lg bg-neutral-800 border border-neutral-600 px-2 py-2 text-[13px] text-white'
+									value={formFirstName}
+									onChange={(e) => setFormFirstName(e.target.value)}
+								/>
+							</div>
+
+							<div className='flex flex-col'>
+								<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
+									DNI *
+								</div>
+								<input
+									className='rounded-lg bg-neutral-800 border border-neutral-600 px-2 py-2 text-[13px] text-white'
+									value={formDni}
+									onChange={(e) => setFormDni(e.target.value)}
+								/>
+							</div>
+
 							<div className='flex flex-col'>
 								<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
 									Sexo *
@@ -1375,134 +1578,117 @@ export default function ParticipantsPage({
 									<option value='M'>M</option>
 									<option value='F'>F</option>
 									<option value='X'>X</option>
-									<option value='ALL'>ALL</option>
 								</select>
+							</div>
+
+							<div className='flex flex-col'>
+								<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
+									Distancia (km) *
+								</div>
+								<input
+									className='rounded-lg bg-neutral-800 border border-neutral-600 px-2 py-2 text-[13px] text-white'
+									value={formDistance}
+									onChange={(e) => setFormDistance(e.target.value)}
+									placeholder='Ej: 5 / 10 / 21'
+								/>
+							</div>
+
+							<div className='flex flex-col'>
+								<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
+									Dorsal
+								</div>
+								<input
+									className='rounded-lg bg-neutral-800 border border-neutral-600 px-2 py-2 text-[13px] text-white'
+									value={formBib}
+									onChange={(e) => setFormBib(e.target.value)}
+									placeholder='Ej: 152'
+								/>
 								<div className='text-[10px] text-neutral-500 mt-1'>
-									Usado también para categorías
+									El chip se genera automático (LT00000).
 								</div>
 							</div>
 
-							<FieldEdit
-								label='Fecha nac.'
-								value={formBirthDate}
-								onChange={setFormBirthDate}
-								hint='DD/MM/AAAA o AAAA-MM-DD'
-							/>
-							<FieldEdit
-								label='Edad'
-								value={formAge}
-								onChange={setFormAge}
-								hint='Sólo número'
-							/>
-							<FieldEdit
-								label='Distancia (km) *'
-								value={formDistance}
-								onChange={setFormDistance}
-								hint='Ej: "21" ó "21K"'
-							/>
-							<FieldEdit
-								label='Dorsal *'
-								value={formBib}
-								onChange={setFormBib}
-								hint='Sólo número'
-							/>
+							<div className='flex flex-col'>
+								<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
+									Fecha nacimiento
+								</div>
+								<input
+									type='date'
+									className='rounded-lg bg-neutral-800 border border-neutral-600 px-2 py-2 text-[13px] text-white'
+									value={formBirthDate}
+									onChange={(e) => setFormBirthDate(e.target.value)}
+								/>
+							</div>
+
+							<div className='flex flex-col'>
+								<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
+									Edad
+								</div>
+								<input
+									className='rounded-lg bg-neutral-800 border border-neutral-600 px-2 py-2 text-[13px] text-white'
+									value={formAge}
+									onChange={(e) => setFormAge(e.target.value)}
+									placeholder='Ej: 34'
+								/>
+							</div>
+
+							<div className='flex flex-col col-span-2'>
+								<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
+									Estado
+								</div>
+								<select
+									className='rounded-lg bg-neutral-800 border border-neutral-600 px-2 py-2 text-[13px] text-white'
+									value={formStatus}
+									onChange={(e) => setFormStatus(e.target.value)}
+								>
+									<option value='registered'>registered</option>
+									<option value='dns'>dns (no largó)</option>
+									<option value='dnf'>dnf (no terminó)</option>
+									<option value='finished'>finished</option>
+								</select>
+							</div>
 						</div>
 
 						<div className='flex flex-col sm:flex-row-reverse sm:justify-end gap-3 mt-4'>
 							<button
 								className='bg-emerald-600 text-white font-semibold text-sm px-4 py-2 rounded-lg active:scale-95 disabled:opacity-50'
-								disabled={savingForm}
-								onClick={saveParticipantForm}
+								disabled={savingParticipant}
+								onClick={handleSaveParticipant}
 							>
-								{savingForm ? 'Guardando...' : 'Guardar'}
+								{savingParticipant ? 'Guardando...' : 'Guardar'}
 							</button>
 							<button
 								className='bg-neutral-800 text-white border border-neutral-600 font-semibold text-sm px-4 py-2 rounded-lg active:scale-95 disabled:opacity-50'
-								disabled={savingForm}
-								onClick={() => setShowEditModal(false)}
+								disabled={savingParticipant}
+								onClick={() => setEditModalOpen(false)}
 							>
 								Cancelar
 							</button>
 						</div>
 
 						<div className='text-[10px] text-neutral-600 mt-3 leading-tight'>
-							Al guardar, se actualiza la tabla. Después podés ejecutar
-							“Recalcular categorías” para que el sistema le asigne la categoría
-							correcta según edad / distancia / sexo.
+							Recordá volver a "Recalcular categorías" si cambiaste
+							edad/distancia/sexo.
 						</div>
 					</div>
 				</div>
 			)}
-
-			{/* ROADMAP */}
-			<div className='mt-8 text-[11px] text-neutral-500 leading-relaxed border-t border-neutral-800 pt-4'>
-				<div className='mb-2 font-medium text-neutral-300 text-[12px]'>
-					Roadmap:
-				</div>
-				<ol className='list-decimal list-inside space-y-1'>
-					<li>
-						Bloqueo por rol (si no sos admin, no podés ni ver esta pantalla).
-					</li>
-					<li>
-						Exportar XLSX de clasificaciones por categoría y distancia directo
-						desde la app.
-					</li>
-				</ol>
-			</div>
 		</main>
 	);
 }
 
-// ============ SUBCOMPONENTES PEQUEÑOS ============
-
-function SelectMap({
-	label,
-	value,
-	setValue,
-	headers,
-	hint,
-}: {
-	label: string;
-	value: string;
-	setValue: (v: string) => void;
-	headers: string[];
-	hint?: string;
-}) {
-	return (
-		<label className='flex flex-col gap-1'>
-			<span className='text-white'>{label}</span>
-			<select
-				className='rounded-lg bg-neutral-800 border border-neutral-600 px-2 py-2'
-				value={value}
-				onChange={(e) => setValue(e.target.value)}
-			>
-				<option value=''>-- Elegir --</option>
-				{headers.map((h) => (
-					<option key={h} value={h}>
-						{h}
-					</option>
-				))}
-			</select>
-			{hint && (
-				<div className='text-[10px] text-neutral-500 leading-tight'>{hint}</div>
-			)}
-		</label>
-	);
-}
-
-function FieldEdit({
+// Componente para el mapeo de columnas en importación
+function ColumnMapper({
 	label,
 	value,
 	onChange,
-	hint,
 }: {
 	label: string;
 	value: string;
 	onChange: (v: string) => void;
-	hint?: string;
 }) {
 	return (
-		<div className='flex flex-col'>
+		<div className='flex flex-col text-[13px]'>
 			<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
 				{label}
 			</div>
@@ -1511,7 +1697,9 @@ function FieldEdit({
 				value={value}
 				onChange={(e) => onChange(e.target.value)}
 			/>
-			{hint && <div className='text-[10px] text-neutral-500 mt-1'>{hint}</div>}
+			<div className='text-[10px] text-neutral-500 leading-tight mt-1'>
+				Nombre EXACTO de la columna en tu archivo.
+			</div>
 		</div>
 	);
 }

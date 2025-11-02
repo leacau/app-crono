@@ -1,23 +1,25 @@
 'use client';
 
 import { use, useEffect, useState } from 'react';
-
-import { supabase } from '../../../../lib/supabaseClient';
 import { useRouter } from 'next/navigation';
+import { supabase } from '../../../../lib/supabaseClient';
 
+// Tipo de carrera
 type Race = {
 	id: number;
 	name: string;
-	date: string;
+	date: string | null;
 	location: string | null;
-	status: string;
+	status: string | null;
 };
 
+// Tipo de categoría (alineado con la BD ya corregida)
 type CategoryRow = {
 	id: number;
+	race_id: number;
 	name: string;
 	distance_km: number | null;
-	sex: string | null; // "M" | "F" | "X" | "ALL"
+	sex_filter: string; // M / F / X / ALL
 	age_min: number | null;
 	age_max: number | null;
 	is_active: boolean;
@@ -30,151 +32,104 @@ export default function CategoriesPage({
 }) {
 	const { raceId: raceIdStr } = use(params);
 	const raceId = Number(raceIdStr);
+
 	const router = useRouter();
 
-	// Datos carrera
+	// carrera actual
 	const [race, setRace] = useState<Race | null>(null);
 
-	// Lista categorías ya existentes en esa carrera
+	// listado de categorías
 	const [categories, setCategories] = useState<CategoryRow[]>([]);
 	const [loading, setLoading] = useState(true);
 
-	// ----------------------------
-	// CREAR CATEGORÍA INDIVIDUAL
-	// ----------------------------
-	const [showNewModal, setShowNewModal] = useState(false);
-	const [savingNew, setSavingNew] = useState(false);
-	const [newErr, setNewErr] = useState('');
+	// errores
+	const [loadErr, setLoadErr] = useState('');
 
-	const [newDist, setNewDist] = useState('10'); // km
-	const [newSex, setNewSex] = useState<'M' | 'F' | 'X' | 'ALL'>('M');
-	const [newAgeMin, setNewAgeMin] = useState('30');
-	const [newAgeMax, setNewAgeMax] = useState('39');
-	const [newIsActive, setNewIsActive] = useState(true);
+	// form crear/editar simple
+	const [showModal, setShowModal] = useState(false);
+	const [editMode, setEditMode] = useState<'new' | 'edit'>('new');
 
-	// Plantilla de nombre dinámico
-	const [nameTemplate, setNameTemplate] = useState(
-		'[[distancia]] [[sexo]] DE [[edad_min]] A [[edad_max]]'
+	const [editId, setEditId] = useState<number | null>(null);
+	const [formName, setFormName] = useState('');
+	const [formDistance, setFormDistance] = useState('');
+	const [formSexFilter, setFormSexFilter] = useState('ALL'); // NOTA: sex_filter
+	const [formAgeMin, setFormAgeMin] = useState('');
+	const [formAgeMax, setFormAgeMax] = useState('');
+	const [formActive, setFormActive] = useState(true);
+
+	const [formErr, setFormErr] = useState('');
+	const [saving, setSaving] = useState(false);
+
+	// Bulk generator (creación masiva)
+	const [showBulk, setShowBulk] = useState(false);
+	const [bulkDistances, setBulkDistances] = useState('');
+	const [bulkRanges, setBulkRanges] = useState(
+		'16-20\n21-35\n36-40\n41-50\n51-55\n56-60\n61-65\n66-99'
 	);
-
-	// Cómo mostrar el sexo en el nombre
-	const [sexLabelMode, setSexLabelMode] = useState<'inicial' | 'completo'>(
-		'inicial'
-	);
-
-	// ----------------------------
-	// CREAR CATEGORÍAS MASIVAS
-	// ----------------------------
-	const [showBulkModal, setShowBulkModal] = useState(false);
-	const [savingBulk, setSavingBulk] = useState(false);
-	const [bulkErr, setBulkErr] = useState('');
-
-	const [bulkDistances, setBulkDistances] = useState('5,10');
-	const [bulkAgeGroups, setBulkAgeGroups] = useState('18-29\n30-39\n40-99');
-
-	const [bulkSexM, setBulkSexM] = useState(true);
-	const [bulkSexF, setBulkSexF] = useState(true);
-	const [bulkSexX, setBulkSexX] = useState(false);
-	const [bulkSexAll, setBulkSexAll] = useState(false);
-
-	const [bulkTemplate, setBulkTemplate] = useState(
-		'[[distancia]] [[sexo]] DE [[edad_min]] A [[edad_max]]'
-	);
-	const [bulkSexLabelMode, setBulkSexLabelMode] = useState<
-		'inicial' | 'completo'
-	>('inicial');
-
+	const [bulkSexes, setBulkSexes] = useState('M\nF\nX\nALL');
 	const [bulkActive, setBulkActive] = useState(true);
 
-	// -------------------------------------------------
-	// Utilidades
-	// -------------------------------------------------
+	const [useAutoName, setUseAutoName] = useState(true);
+	const [nameTemplate, setNameTemplate] = useState(
+		`[[distancia]]K [[sexo]] DE [[edad_min]] A [[edad_max]]`
+	);
+	const [sexoEnNombre, setSexoEnNombre] = useState(true); // para decidir FULL ("Femenino") vs sigla ("F")
 
-	function sexToLabel(sexCode: string, mode: 'inicial' | 'completo'): string {
-		if (mode === 'inicial') {
-			return sexCode;
-		}
-		switch (sexCode) {
-			case 'M':
-				return 'MASCULINO';
-			case 'F':
-				return 'FEMENINO';
-			case 'X':
-				return 'NO BINARIO';
-			case 'ALL':
-				return 'GENERAL';
-			default:
-				return sexCode;
-		}
-	}
+	const [bulkErr, setBulkErr] = useState('');
+	const [bulkSaving, setBulkSaving] = useState(false);
 
-	function buildCategoryName(
-		template: string,
-		distKm: string | number | null,
-		sexCode: string,
-		ageMin: string | number | null,
-		ageMax: string | number | null,
-		mode: 'inicial' | 'completo'
-	) {
-		const cleanDist =
-			distKm === null || distKm === '' ? '' : String(distKm).trim();
-		const cleanSex = sexToLabel(sexCode, mode);
-		const cleanMin =
-			ageMin === null || ageMin === '' ? '' : String(ageMin).trim();
-		const cleanMax =
-			ageMax === null || ageMax === '' ? '' : String(ageMax).trim();
-
-		return template
-			.replaceAll('[[distancia]]', cleanDist)
-			.replaceAll('[[sexo]]', cleanSex)
-			.replaceAll('[[edad_min]]', cleanMin)
-			.replaceAll('[[edad_max]]', cleanMax)
-			.trim();
-	}
-
-	function parseNumberOrNull(v: string): number | null {
-		if (!v || !v.trim()) return null;
-		const n = Number(v.replace(',', '.'));
-		if (!Number.isFinite(n)) return null;
-		return n;
-	}
-
-	// -------------------------------------------------
-	// Carga inicial
-	// -------------------------------------------------
-
+	// -------------------------------------------------------
+	// loadData: trae carrera + categorías
+	// -------------------------------------------------------
 	async function loadData() {
 		setLoading(true);
+		setLoadErr('');
 
 		// carrera
-		const { data: raceData, error: raceErr } = await supabase
+		const { data: rdata, error: rerr } = await supabase
 			.from('races')
-			.select('id, name, date, location, status')
+			.select('id,name,date,location,status')
 			.eq('id', raceId)
 			.single();
 
-		if (raceErr) {
-			console.error('Error cargando carrera:', raceErr);
+		if (rerr) {
+			console.error(rerr);
 			setRace(null);
 		} else {
-			setRace(raceData as Race);
+			setRace(rdata as Race);
 		}
 
-		// categorías actuales
-		const { data: catData, error: catErr } = await supabase
+		// categorías
+		// OJO: ahora pedimos sex_filter, NO sex
+		const { data: cdata, error: cerr } = await supabase
 			.from('categories')
-			.select('id, name, distance_km, sex, age_min, age_max, is_active')
+			.select(
+				`
+        id,
+        race_id,
+        name,
+        distance_km,
+        sex_filter,
+        age_min,
+        age_max,
+        is_active
+      `
+			)
 			.eq('race_id', raceId)
 			.order('distance_km', { ascending: true })
 			.order('age_min', { ascending: true });
 
-		if (catErr) {
-			console.error('Error cargando categorías:', catErr);
+		if (cerr) {
+			console.error('Error cargando categorías:', cerr);
+			setLoadErr(cerr.message || 'Error al cargar categorías (ver consola).');
 			setCategories([]);
 		} else {
-			setCategories(catData as CategoryRow[]);
+			setCategories((cdata || []) as CategoryRow[]);
 		}
 
+		// limpiar formularios
+		resetForm();
+		resetBulk();
 		setLoading(false);
 	}
 
@@ -183,328 +138,349 @@ export default function CategoriesPage({
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [raceId]);
 
-	// -------------------------------------------------
-	// Crear categoría individual
-	// -------------------------------------------------
+	// -------------------------------------------------------
+	// helpers UI
+	// -------------------------------------------------------
 
-	async function handleCreateCategory() {
-		if (!race) {
-			setNewErr('No hay carrera cargada.');
+	function resetForm() {
+		setShowModal(false);
+		setEditMode('new');
+		setEditId(null);
+		setFormName('');
+		setFormDistance('');
+		setFormSexFilter('ALL'); // sex_filter por default
+		setFormAgeMin('');
+		setFormAgeMax('');
+		setFormActive(true);
+		setFormErr('');
+		setSaving(false);
+	}
+
+	function resetBulk() {
+		setShowBulk(false);
+		setBulkDistances('');
+		setBulkRanges('16-20\n21-35\n36-40\n41-50\n51-55\n56-60\n61-65\n66-99');
+		setBulkSexes('M\nF\nX\nALL');
+		setBulkActive(true);
+		setUseAutoName(true);
+		setNameTemplate(`[[distancia]]K [[sexo]] DE [[edad_min]] A [[edad_max]]`);
+		setSexoEnNombre(true);
+		setBulkErr('');
+		setBulkSaving(false);
+	}
+
+	function openNew() {
+		resetForm();
+		setEditMode('new');
+		setShowModal(true);
+	}
+
+	function openEdit(cat: CategoryRow) {
+		resetForm();
+		setEditMode('edit');
+		setEditId(cat.id);
+
+		setFormName(cat.name || '');
+		setFormDistance(cat.distance_km != null ? String(cat.distance_km) : '');
+		setFormSexFilter(cat.sex_filter || 'ALL');
+		setFormAgeMin(cat.age_min != null ? String(cat.age_min) : '');
+		setFormAgeMax(cat.age_max != null ? String(cat.age_max) : '');
+		setFormActive(!!cat.is_active);
+
+		setShowModal(true);
+	}
+
+	// -------------------------------------------------------
+	// Guardar categoría individual (new / edit)
+	// -------------------------------------------------------
+	async function handleSave() {
+		if (!race) return;
+		setSaving(true);
+		setFormErr('');
+
+		// validaciones básicas
+		const distNum = formDistance
+			? Number(String(formDistance).replace(',', '.'))
+			: null;
+		if (!Number.isFinite(distNum)) {
+			setFormErr('Distancia inválida.');
+			setSaving(false);
 			return;
 		}
 
-		setSavingNew(true);
-		setNewErr('');
-
-		const distNum = parseNumberOrNull(newDist);
-		if (distNum === null || distNum <= 0) {
-			setNewErr('Distancia inválida.');
-			setSavingNew(false);
-			return;
-		}
-
-		const minNum = parseNumberOrNull(newAgeMin);
-		const maxNum = parseNumberOrNull(newAgeMax);
+		const amin = formAgeMin ? Number(formAgeMin) : null;
+		const amax = formAgeMax ? Number(formAgeMax) : null;
 
 		if (
-			minNum === null ||
-			maxNum === null ||
-			minNum < 0 ||
-			maxNum < 0 ||
-			maxNum < minNum
+			amin != null &&
+			amax != null &&
+			Number.isFinite(amin) &&
+			Number.isFinite(amax) &&
+			amin > amax
 		) {
-			setNewErr('Rango de edad inválido.');
-			setSavingNew(false);
+			setFormErr('Edad mínima mayor que edad máxima.');
+			setSaving(false);
 			return;
 		}
 
-		if (!newSex) {
-			setNewErr('Seleccioná un sexo.');
-			setSavingNew(false);
+		if (!formSexFilter) {
+			setFormErr('Sexo requerido (M / F / X / ALL).');
+			setSaving(false);
 			return;
 		}
 
-		const finalName = buildCategoryName(
-			nameTemplate,
-			distNum,
-			newSex,
-			minNum,
-			maxNum,
-			sexLabelMode
+		if (!formName.trim()) {
+			setFormErr('El nombre de la categoría es obligatorio.');
+			setSaving(false);
+			return;
+		}
+
+		// Objeto que matchea TU BD:
+		const row: any = {
+			race_id: race.id,
+			name: formName.trim(),
+			distance_km: distNum,
+			sex_filter: formSexFilter, // <-- IMPORTANTE
+			age_min: amin,
+			age_max: amax,
+			is_active: formActive,
+		};
+
+		let errorSave = null;
+		if (editMode === 'new') {
+			const { error } = await supabase.from('categories').insert([row]);
+			errorSave = error || null;
+		} else {
+			const { error } = await supabase
+				.from('categories')
+				.update(row)
+				.eq('id', editId)
+				.eq('race_id', race.id);
+			errorSave = error || null;
+		}
+
+		if (errorSave) {
+			console.error('Error guardando categoría:', errorSave);
+			setFormErr(errorSave.message || 'No se pudo guardar la categoría.');
+			setSaving(false);
+			return;
+		}
+
+		// recargar
+		await loadData();
+		setShowModal(false);
+		setSaving(false);
+	}
+
+	// -------------------------------------------------------
+	// Borrar categoría (1 sola)
+	// -------------------------------------------------------
+	async function handleDeleteOne(cat: CategoryRow) {
+		if (!race) return;
+		const ok = window.confirm(
+			`Vas a borrar "${cat.name}" (dist ${cat.distance_km} km, ${cat.sex_filter}). ¿Confirmás?`
 		);
+		if (!ok) return;
 
-		if (!finalName.trim()) {
-			setNewErr('El nombre resultante quedó vacío. Revisá la plantilla.');
-			setSavingNew(false);
+		const { error } = await supabase
+			.from('categories')
+			.delete()
+			.eq('id', cat.id)
+			.eq('race_id', race.id);
+
+		if (error) {
+			console.error('Error borrando categoría:', error);
+			alert('No se pudo borrar la categoría.');
 			return;
 		}
-
-		const { error: insErr } = await supabase.from('categories').insert([
-			{
-				race_id: race.id,
-				name: finalName,
-				distance_km: distNum,
-				sex: newSex, // 🔁 acá usamos "sex", no "sex_filter"
-				age_min: minNum,
-				age_max: maxNum,
-				is_active: newIsActive,
-			},
-		]);
-
-		if (insErr) {
-			console.error('Error creando categoría:', insErr);
-			setNewErr('No se pudo crear la categoría (posible duplicado).');
-			setSavingNew(false);
-			return;
-		}
-
-		setSavingNew(false);
-		setShowNewModal(false);
-		setNewErr('');
 
 		loadData();
 	}
 
-	// -------------------------------------------------
-	// Crear categorías masivas (con filtro de duplicados)
-	// -------------------------------------------------
+	// -------------------------------------------------------
+	// Borrar TODAS las categorías de la carrera
+	// -------------------------------------------------------
+	async function handleDeleteAll() {
+		if (!race) return;
+		const ok = window.confirm(
+			`Esto borra TODAS las categorías de "${race.name}". ¿Estás seguro?`
+		);
+		if (!ok) return;
 
-	async function handleBulkCreate() {
-		if (!race) {
-			setBulkErr('No hay carrera cargada.');
+		const { error } = await supabase
+			.from('categories')
+			.delete()
+			.eq('race_id', race.id);
+
+		if (error) {
+			console.error('Error borrando todas:', error);
+			alert('No se pudieron borrar todas las categorías.');
 			return;
 		}
 
-		setSavingBulk(true);
+		loadData();
+	}
+
+	// -------------------------------------------------------
+	// Crear categorías masivas
+	// -------------------------------------------------------
+	async function handleBulkCreate() {
+		if (!race) return;
+
+		setBulkSaving(true);
 		setBulkErr('');
 
-		// Distancias "5,10,21"
-		const dists = bulkDistances
+		// 1. Distancias
+		// "5,10,21" => [5,10,21]
+		const distancesRaw = bulkDistances
 			.split(',')
 			.map((d) => d.trim())
-			.filter((d) => d.length > 0);
+			.filter((d) => d !== '');
+		const distancesNum = distancesRaw
+			.map((d) => Number(d.replace(',', '.')))
+			.filter((n) => Number.isFinite(n));
 
-		// Rangos "16-20" / "21-35" (uno por línea)
-		const ageGroups = bulkAgeGroups
+		// 2. Rangos de edad
+		// "18-29" una por línea
+		const rangeLines = bulkRanges
 			.split('\n')
-			.map((line) => line.trim())
-			.filter((line) => line.length > 0);
-
-		// Sexos activos
-		const chosenSexes: string[] = [];
-		if (bulkSexM) chosenSexes.push('M');
-		if (bulkSexF) chosenSexes.push('F');
-		if (bulkSexX) chosenSexes.push('X');
-		if (bulkSexAll) chosenSexes.push('ALL');
-
-		if (dists.length === 0) {
-			setBulkErr('Ingresá al menos una distancia.');
-			setSavingBulk(false);
-			return;
-		}
-		if (ageGroups.length === 0) {
-			setBulkErr('Ingresá al menos un rango de edad.');
-			setSavingBulk(false);
-			return;
-		}
-		if (chosenSexes.length === 0) {
-			setBulkErr('Seleccioná al menos un sexo.');
-			setSavingBulk(false);
-			return;
-		}
-
-		// Armar combinaciones candidatas
-		const candidateRows: {
-			race_id: number;
-			name: string;
-			distance_km: number;
-			sex: string;
-			age_min: number;
-			age_max: number;
-			is_active: boolean;
-		}[] = [];
-
-		for (const distStr of dists) {
-			const distNum = parseNumberOrNull(distStr);
-			if (distNum === null || distNum <= 0) {
-				setBulkErr(`Distancia inválida: ${distStr}`);
-				setSavingBulk(false);
-				return;
-			}
-
-			for (const grp of ageGroups) {
-				// ej "16-20"
-				const m = grp.match(/^(\d+)\s*[-]\s*(\d+)$/);
-				if (!m) {
-					setBulkErr(`Rango de edad inválido: "${grp}". Usá formato 18-29`);
-					setSavingBulk(false);
-					return;
+			.map((l) => l.trim())
+			.filter((l) => l !== '');
+		const rangesParsed = rangeLines
+			.map((line) => {
+				const m = line.match(/^(\d{1,3})\s*[-]\s*(\d{1,3})$/);
+				if (!m) return null;
+				const minN = Number(m[1]);
+				const maxN = Number(m[2]);
+				if (!Number.isFinite(minN) || !Number.isFinite(maxN) || minN > maxN) {
+					return null;
 				}
-				const gMin = Number(m[1]);
-				const gMax = Number(m[2]);
-				if (!Number.isFinite(gMin) || !Number.isFinite(gMax) || gMax < gMin) {
-					setBulkErr(`Rango inválido: ${grp}`);
-					setSavingBulk(false);
-					return;
-				}
+				return { min: minN, max: maxN };
+			})
+			.filter((r) => r !== null) as { min: number; max: number }[];
 
-				for (const sexCode of chosenSexes) {
-					const catName = buildCategoryName(
-						bulkTemplate,
-						distNum,
-						sexCode,
-						gMin,
-						gMax,
-						bulkSexLabelMode
-					);
+		// 3. Sexos
+		// multiline: "M\nF\nX\nALL"
+		const sexes = bulkSexes
+			.split('\n')
+			.map((s) => s.trim().toUpperCase())
+			.filter((s) => s !== '');
 
-					if (!catName.trim()) {
-						setBulkErr(
-							`El nombre quedó vacío para ${distNum} / ${sexCode} / ${gMin}-${gMax}`
-						);
-						setSavingBulk(false);
-						return;
-					}
+		if (
+			distancesNum.length === 0 ||
+			rangesParsed.length === 0 ||
+			sexes.length === 0
+		) {
+			setBulkErr('No se pudieron interpretar distancias / rangos / sexos.');
+			setBulkSaving(false);
+			return;
+		}
 
-					candidateRows.push({
+		// 4. Construir combinaciones
+		const toInsert: any[] = [];
+
+		for (const dist of distancesNum) {
+			for (const sx of sexes) {
+				for (const r of rangesParsed) {
+					// nombre automático o manual
+					let finalName = formatearNombreCategoria({
+						distancia: dist,
+						sexo: sx,
+						edadMin: r.min,
+						edadMax: r.max,
+						tpl: nameTemplate,
+						usarSexoLargo: sexoEnNombre,
+						usarAuto: useAutoName,
+					});
+
+					toInsert.push({
 						race_id: race.id,
-						name: catName,
-						distance_km: distNum,
-						sex: sexCode, // 🔁 usamos "sex" acá también
-						age_min: gMin,
-						age_max: gMax,
+						name: finalName,
+						distance_km: dist,
+						sex_filter: sx, // <-- clave, usamos sex_filter
+						age_min: r.min,
+						age_max: r.max,
 						is_active: bulkActive,
 					});
 				}
 			}
 		}
 
-		if (candidateRows.length === 0) {
-			setBulkErr('No se generó ninguna categoría candidata.');
-			setSavingBulk(false);
+		if (toInsert.length === 0) {
+			setBulkErr('No se armó ninguna fila para insertar.');
+			setBulkSaving(false);
 			return;
 		}
 
-		// Evitar duplicados internos + duplicados contra lo que YA existe
-		// Clave única lógica: distance_km + sex + age_min + age_max
-		const seenKeys = new Set<string>();
+		// 5. Insert masivo
+		const { error: insErr } = await supabase
+			.from('categories')
+			.insert(toInsert);
 
-		function makeKey(
-			distance_km: number,
-			sex: string | null,
-			age_min: number | null,
-			age_max: number | null
-		) {
-			return `${distance_km}__${sex ?? ''}__${age_min ?? ''}__${age_max ?? ''}`;
-		}
-
-		// metemos lo que ya existe en carrera
-		for (const c of categories) {
-			if (
-				c.distance_km != null &&
-				c.sex != null &&
-				c.age_min != null &&
-				c.age_max != null
-			) {
-				const k = makeKey(c.distance_km, c.sex, c.age_min, c.age_max);
-				seenKeys.add(k);
-			}
-		}
-
-		// filtramos
-		const rowsToInsert: typeof candidateRows = [];
-		for (const row of candidateRows) {
-			const k = makeKey(row.distance_km, row.sex, row.age_min, row.age_max);
-			if (seenKeys.has(k)) {
-				// ya existe en DB o ya lo agregamos en esta misma tanda
-				continue;
-			}
-			seenKeys.add(k);
-			rowsToInsert.push(row);
-		}
-
-		if (rowsToInsert.length === 0) {
+		if (insErr) {
+			console.error('Error creando categorías masivas:', insErr);
 			setBulkErr(
-				'Todas las combinaciones que intentaste crear ya existen en esta carrera.'
+				insErr.message ||
+					'Supabase rechazó la carga masiva. Revisá distancias / rangos / sexos.'
 			);
-			setSavingBulk(false);
+			setBulkSaving(false);
 			return;
 		}
 
-		// Insert masivo sólo con las nuevas de verdad
-		const { error: bulkErrRes } = await supabase
-			.from('categories')
-			.insert(rowsToInsert);
-
-		if (bulkErrRes) {
-			console.error('Error creando categorías masivas:', bulkErrRes);
-			setBulkErr(
-				'No se pudieron crear las categorías masivas. Revisá distancias / rangos / sexos.'
-			);
-			setSavingBulk(false);
-			return;
-		}
-
-		setSavingBulk(false);
-		setShowBulkModal(false);
-		setBulkErr('');
-
-		loadData();
+		// 6. recargar tabla
+		await loadData();
+		setShowBulk(false);
+		setBulkSaving(false);
 	}
 
-	// -------------------------------------------------
-	// Toggle activar/desactivar categoría
-	// -------------------------------------------------
-
-	async function toggleActive(cat: CategoryRow) {
-		const { error: upErr } = await supabase
-			.from('categories')
-			.update({ is_active: !cat.is_active })
-			.eq('id', cat.id)
-			.eq('race_id', raceId);
-
-		if (upErr) {
-			console.error('Error cambiando estado de categoría:', upErr);
+	// -------------------------------------------------------
+	// helper: generar nombre categoría
+	// -------------------------------------------------------
+	function formatearNombreCategoria({
+		distancia,
+		sexo,
+		edadMin,
+		edadMax,
+		tpl,
+		usarSexoLargo,
+		usarAuto,
+	}: {
+		distancia: number;
+		sexo: string;
+		edadMin: number;
+		edadMax: number;
+		tpl: string;
+		usarSexoLargo: boolean;
+		usarAuto: boolean;
+	}): string {
+		if (!usarAuto) {
+			// modo manual: devuelvo tpl tal cual (sin reemplazos)
+			return tpl.trim() || 'Categoría';
 		}
-		loadData();
+
+		// sexo visible en nombre
+		// si usarSexoLargo === true => "M" => "MASCULINO", "F" => "FEMENINO", "X" => "X", "ALL" => "GENERAL"
+		// si usarSexoLargo === false => se deja "M", "F", "X", "ALL"
+		let sexoNom = sexo;
+		if (usarSexoLargo) {
+			if (sexo === 'M') sexoNom = 'MASCULINO';
+			else if (sexo === 'F') sexoNom = 'FEMENINO';
+			else if (sexo === 'X') sexoNom = 'X';
+			else if (sexo === 'ALL') sexoNom = 'GENERAL';
+		}
+
+		return tpl
+			.replace(/\[\[distancia\]\]/gi, String(distancia))
+			.replace(/\[\[sexo\]\]/gi, sexoNom)
+			.replace(/\[\[edad_min\]\]/gi, String(edadMin))
+			.replace(/\[\[edad_max\]\]/gi, String(edadMax))
+			.trim()
+			.replace(/\s+/g, ' ');
 	}
 
-	// -------------------------------------------------
-	// Borrar UNA categoría
-	// -------------------------------------------------
-
-	async function deleteOneCategory(catId: number) {
-		const { error: delErr } = await supabase
-			.from('categories')
-			.delete()
-			.eq('id', catId)
-			.eq('race_id', raceId);
-
-		if (delErr) {
-			console.error('Error borrando categoría:', delErr);
-		}
-		loadData();
-	}
-
-	// -------------------------------------------------
-	// Borrar TODAS las categorías de la carrera
-	// -------------------------------------------------
-
-	async function deleteAllCategories() {
-		const { error: delErrAll } = await supabase
-			.from('categories')
-			.delete()
-			.eq('race_id', raceId);
-
-		if (delErrAll) {
-			console.error('Error borrando TODAS las categorías:', delErrAll);
-		}
-		loadData();
-	}
-
-	// -------------------------------------------------
-	// Render
-	// -------------------------------------------------
+	// -------------------------------------------------------
+	// RENDER
+	// -------------------------------------------------------
 
 	if (loading && !race) {
 		return (
@@ -520,22 +496,13 @@ export default function CategoriesPage({
 				<div className='text-red-400 mb-4'>Carrera no encontrada</div>
 				<button
 					className='bg-neutral-800 border border-neutral-600 rounded-lg px-4 py-2 text-white'
-					onClick={() => router.push('/')}
+					onClick={() => router.push('/admin')}
 				>
 					Volver
 				</button>
 			</main>
 		);
 	}
-
-	const previewSingleName = buildCategoryName(
-		nameTemplate,
-		newDist,
-		newSex,
-		newAgeMin,
-		newAgeMax,
-		sexLabelMode
-	);
 
 	return (
 		<main className='min-h-screen bg-neutral-950 text-white p-4 pb-24'>
@@ -544,9 +511,16 @@ export default function CategoriesPage({
 				<div className='text-sm text-neutral-400 flex items-center gap-2 flex-wrap'>
 					<button
 						className='underline text-neutral-300'
+						onClick={() => router.push(`/admin`)}
+					>
+						← Admin
+					</button>
+					<span className='text-neutral-600'>/</span>
+					<button
+						className='underline text-neutral-300'
 						onClick={() => router.push(`/race/${raceId}`)}
 					>
-						← {race.name}
+						{race.name}
 					</button>
 					<span className='text-neutral-600'>/</span>
 					<span>Categorías</span>
@@ -554,7 +528,7 @@ export default function CategoriesPage({
 
 				<div className='min-w-0'>
 					<h1 className='text-2xl font-bold leading-tight break-words'>
-						Categorías de carrera
+						Categorías
 					</h1>
 					<div className='text-sm text-neutral-400'>
 						{race.date} · {race.location || 'Sin ubicación'}
@@ -576,456 +550,484 @@ export default function CategoriesPage({
 				</div>
 			</div>
 
-			{/* ACCIONES RÁPIDAS */}
-			<div className='flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-6'>
-				<div className='flex flex-col gap-2 text-[11px] text-neutral-500 leading-tight'>
-					<div>
-						Definí las reglas de premiación: Distancia / Sexo / Rango de edad.
-					</div>
-					<div>
-						Solo las categorías ACTIVAS se usan para asignar corredores.
+			{loadErr && (
+				<div className='text-red-400 text-sm bg-red-950/30 border border-red-700 rounded-lg px-3 py-2 mb-4'>
+					{loadErr}
+				</div>
+			)}
+
+			{/* ACCIONES */}
+			<div className='flex flex-col sm:flex-row sm:items-start gap-4 mb-6'>
+				<div className='flex flex-col gap-2'>
+					<button
+						className='bg-emerald-600 text-white font-semibold text-sm px-4 py-2 rounded-lg active:scale-95'
+						onClick={openNew}
+					>
+						+ Nueva categoría
+					</button>
+					<div className='text-[10px] text-neutral-500 leading-tight'>
+						Alta manual de 1 categoría.
 					</div>
 				</div>
 
-				<div className='flex flex-col sm:flex-row gap-2 w-full sm:w-auto'>
+				<div className='flex flex-col gap-2'>
 					<button
-						className='bg-emerald-600 text-white text-sm font-semibold px-4 py-2 rounded-lg active:scale-95 w-full sm:w-auto'
+						className='bg-blue-600 text-white font-semibold text-sm px-4 py-2 rounded-lg active:scale-95'
 						onClick={() => {
-							setNewErr('');
-							setShowNewModal(true);
+							resetBulk();
+							setShowBulk(true);
 						}}
 					>
-						+ Categoría
+						+ Generación masiva
 					</button>
+					<div className='text-[10px] text-neutral-500 leading-tight'>
+						Distancias x Sexos x Rangos de edad.
+					</div>
+				</div>
 
+				<div className='flex flex-col gap-2'>
 					<button
-						className='bg-blue-600 text-white text-sm font-semibold px-4 py-2 rounded-lg active:scale-95 w-full sm:w-auto'
-						onClick={() => {
-							setBulkErr('');
-							setShowBulkModal(true);
-						}}
-					>
-						+ Masivo
-					</button>
-
-					<button
-						className='bg-red-700 text-white text-sm font-semibold px-4 py-2 rounded-lg active:scale-95 w-full sm:w-auto'
-						onClick={deleteAllCategories}
+						className='bg-red-700 text-white font-semibold text-sm px-4 py-2 rounded-lg active:scale-95'
+						onClick={handleDeleteAll}
 					>
 						Borrar todas
 					</button>
+					<div className='text-[10px] text-neutral-500 leading-tight'>
+						⚠ Irreversible (sólo esta carrera).
+					</div>
 				</div>
 			</div>
 
-			{/* LISTA DE CATEGORÍAS */}
-			{categories.length === 0 ? (
-				<div className='text-neutral-400 text-sm'>
-					Aún no hay categorías creadas en esta carrera.
+			{/* LISTADO CATEGORÍAS */}
+			<div className='border border-neutral-700 bg-neutral-900 rounded-xl overflow-hidden'>
+				<div className='overflow-x-auto'>
+					<table className='min-w-full text-left text-sm text-neutral-200'>
+						<thead className='bg-neutral-800 text-[11px] uppercase text-neutral-400'>
+							<tr>
+								<th className='px-3 py-2 whitespace-nowrap'>Nombre</th>
+								<th className='px-3 py-2 whitespace-nowrap'>Dist</th>
+								<th className='px-3 py-2 whitespace-nowrap'>Sexo</th>
+								<th className='px-3 py-2 whitespace-nowrap'>Edad min</th>
+								<th className='px-3 py-2 whitespace-nowrap'>Edad max</th>
+								<th className='px-3 py-2 whitespace-nowrap'>Activa</th>
+								<th className='px-3 py-2 whitespace-nowrap text-right'>
+									Acciones
+								</th>
+							</tr>
+						</thead>
+						<tbody>
+							{categories.length === 0 ? (
+								<tr>
+									<td
+										colSpan={7}
+										className='px-3 py-4 text-center text-neutral-500 text-[12px]'
+									>
+										Sin categorías cargadas.
+									</td>
+								</tr>
+							) : (
+								categories.map((c, idx) => (
+									<tr
+										key={c.id}
+										className={
+											idx % 2 === 0 ? 'bg-neutral-900' : 'bg-neutral-950/40'
+										}
+									>
+										<td className='px-3 py-2'>
+											<div className='text-white text-[13px] font-semibold leading-tight'>
+												{c.name}
+											</div>
+											<div className='text-[10px] text-neutral-500 leading-tight'>
+												ID #{c.id}
+											</div>
+										</td>
+
+										<td className='px-3 py-2 text-[13px] text-neutral-300'>
+											{c.distance_km != null ? `${c.distance_km}K` : '—'}
+										</td>
+
+										<td className='px-3 py-2 text-[13px] text-neutral-300'>
+											{c.sex_filter || '—'}
+										</td>
+
+										<td className='px-3 py-2 text-[13px] text-neutral-300'>
+											{c.age_min != null ? c.age_min : '—'}
+										</td>
+
+										<td className='px-3 py-2 text-[13px] text-neutral-300'>
+											{c.age_max != null ? c.age_max : '—'}
+										</td>
+
+										<td className='px-3 py-2 text-[13px]'>
+											{c.is_active ? (
+												<span className='text-emerald-400 font-semibold'>
+													Sí
+												</span>
+											) : (
+												<span className='text-neutral-500'>No</span>
+											)}
+										</td>
+
+										<td className='px-3 py-2 text-right text-[13px] text-neutral-300'>
+											<button
+												className='text-emerald-400 underline text-[12px] mr-3'
+												onClick={() => openEdit(c)}
+											>
+												Editar
+											</button>
+											<button
+												className='text-red-400 underline text-[12px]'
+												onClick={() => handleDeleteOne(c)}
+											>
+												Borrar
+											</button>
+										</td>
+									</tr>
+								))
+							)}
+						</tbody>
+					</table>
 				</div>
-			) : (
-				<ul className='flex flex-col gap-2'>
-					{categories.map((c) => (
-						<li
-							key={c.id}
-							className='border border-neutral-700 bg-neutral-900 rounded-xl p-3 text-sm flex flex-col gap-2'
-						>
-							<div className='flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2'>
-								<div className='flex flex-col min-w-0'>
-									<div className='flex items-center gap-2 flex-wrap'>
-										<div className='text-white font-semibold leading-tight break-words'>
-											{c.name}
-										</div>
-										<div
-											className={`text-[10px] px-2 py-[2px] rounded border leading-tight ${
-												c.is_active
-													? 'bg-emerald-900/20 border-emerald-600 text-emerald-400'
-													: 'bg-neutral-800 border-neutral-600 text-neutral-400'
-											}`}
-										>
-											{c.is_active ? 'ACTIVA' : 'INACTIVA'}
-										</div>
-									</div>
 
-									<div className='text-[11px] text-neutral-400 flex flex-wrap gap-2 leading-tight mt-1'>
-										<span>
-											Dist: {c.distance_km != null ? `${c.distance_km}K` : '—'}
-										</span>
-										<span>Sexo: {c.sex || '—'}</span>
-										<span>
-											Edad:{' '}
-											{c.age_min != null && c.age_max != null
-												? `${c.age_min} a ${c.age_max}`
-												: '—'}
-										</span>
-									</div>
+				<div className='p-3 text-[10px] text-neutral-500 border-t border-neutral-800'>
+					Recordá activar sólo las categorías oficiales. “Recalcular categorías”
+					en Participantes ignora las que estén inactivas.
+				</div>
+			</div>
+
+			{/* MODAL NUEVA / EDITAR */}
+			{showModal && (
+				<div className='fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4'>
+					<div className='w-full max-w-md bg-neutral-900 border border-neutral-700 rounded-2xl p-4 text-white'>
+						<div className='flex items-start justify-between mb-3'>
+							<div>
+								<div className='text-lg font-semibold'>
+									{editMode === 'new' ? 'Nueva categoría' : 'Editar categoría'}
 								</div>
-
-								<div className='flex flex-row flex-wrap items-center gap-2 shrink-0'>
-									<button
-										className='text-[11px] bg-neutral-800 border border-neutral-600 rounded px-2 py-1 text-neutral-200 active:scale-95'
-										onClick={() => toggleActive(c)}
-									>
-										{c.is_active ? 'Desactivar' : 'Activar'}
-									</button>
-
-									<button
-										className='text-[11px] bg-red-800 border border-red-600 rounded px-2 py-1 text-white active:scale-95'
-										onClick={() => deleteOneCategory(c.id)}
-									>
-										Borrar
-									</button>
+								<div className='text-[11px] text-neutral-500 leading-tight'>
+									Distancia km, sexo, rango etario, activa / no activa.
 								</div>
-							</div>
-						</li>
-					))}
-				</ul>
-			)}
-
-			{/* MODAL NUEVA CATEGORÍA */}
-			{showNewModal && (
-				<div className='fixed inset-0 flex items-center justify-center bg-black/70 p-4 z-[100]'>
-					<div className='w-full max-w-sm bg-neutral-900 border border-neutral-700 rounded-xl p-4 flex flex-col gap-4 max-h-[90vh] overflow-y-auto'>
-						<div className='flex items-start justify-between'>
-							<div className='text-lg font-semibold text-white'>
-								Nueva categoría
 							</div>
 							<button
 								className='text-neutral-400 text-sm'
-								disabled={savingNew}
 								onClick={() => {
-									if (!savingNew) {
-										setShowNewModal(false);
-										setNewErr('');
-									}
+									if (!saving) setShowModal(false);
 								}}
 							>
 								✕
 							</button>
 						</div>
 
-						{newErr && <div className='text-red-400 text-sm'>{newErr}</div>}
+						{formErr && (
+							<div className='text-red-400 text-sm bg-red-950/30 border border-red-700 rounded-lg px-3 py-2 mb-3'>
+								{formErr}
+							</div>
+						)}
 
-						<div className='text-[11px] text-neutral-400 leading-tight'>
-							Definí las reglas y generamos el nombre automáticamente.
+						<div className='grid grid-cols-2 gap-3 text-[13px]'>
+							{/* Nombre */}
+							<div className='flex flex-col col-span-2'>
+								<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
+									Nombre *
+								</div>
+								<input
+									className='rounded-lg bg-neutral-800 border border-neutral-600 px-2 py-2 text-[13px] text-white'
+									value={formName}
+									onChange={(e) => setFormName(e.target.value)}
+								/>
+								<div className='text-[10px] text-neutral-500 mt-1'>
+									Ej: 21K FEMENINO DE 18 A 29
+								</div>
+							</div>
+
+							{/* Distancia */}
+							<div className='flex flex-col'>
+								<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
+									Distancia (km) *
+								</div>
+								<input
+									className='rounded-lg bg-neutral-800 border border-neutral-600 px-2 py-2 text-[13px] text-white'
+									value={formDistance}
+									onChange={(e) => setFormDistance(e.target.value)}
+								/>
+								<div className='text-[10px] text-neutral-500 mt-1'>
+									Ej: 5 / 10 / 21
+								</div>
+							</div>
+
+							{/* Sexo filtro */}
+							<div className='flex flex-col'>
+								<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
+									Sexo *
+								</div>
+								<select
+									className='rounded-lg bg-neutral-800 border border-neutral-600 px-2 py-2 text-[13px] text-white'
+									value={formSexFilter}
+									onChange={(e) => setFormSexFilter(e.target.value)}
+								>
+									<option value='M'>M</option>
+									<option value='F'>F</option>
+									<option value='X'>X</option>
+									<option value='ALL'>ALL</option>
+								</select>
+								<div className='text-[10px] text-neutral-500 mt-1'>
+									"ALL" = Mixta / General
+								</div>
+							</div>
+
+							{/* Edad min */}
+							<div className='flex flex-col'>
+								<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
+									Edad mínima
+								</div>
+								<input
+									className='rounded-lg bg-neutral-800 border border-neutral-600 px-2 py-2 text-[13px] text-white'
+									value={formAgeMin}
+									onChange={(e) => setFormAgeMin(e.target.value)}
+								/>
+							</div>
+
+							{/* Edad max */}
+							<div className='flex flex-col'>
+								<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
+									Edad máxima
+								</div>
+								<input
+									className='rounded-lg bg-neutral-800 border border-neutral-600 px-2 py-2 text-[13px] text-white'
+									value={formAgeMax}
+									onChange={(e) => setFormAgeMax(e.target.value)}
+								/>
+							</div>
+
+							{/* Activa */}
+							<div className='flex flex-col'>
+								<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
+									Activa
+								</div>
+								<select
+									className='rounded-lg bg-neutral-800 border border-neutral-600 px-2 py-2 text-[13px] text-white'
+									value={formActive ? '1' : '0'}
+									onChange={(e) => setFormActive(e.target.value === '1')}
+								>
+									<option value='1'>Sí</option>
+									<option value='0'>No</option>
+								</select>
+							</div>
 						</div>
 
-						{/* Distancia */}
-						<label className='text-sm flex flex-col gap-1'>
-							<span>Distancia (km) *</span>
-							<input
-								className='w-full rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-base'
-								value={newDist}
-								onChange={(e) => setNewDist(e.target.value)}
-								disabled={savingNew}
-								placeholder='10'
-							/>
-						</label>
-
-						{/* Sexo */}
-						<label className='text-sm flex flex-col gap-1'>
-							<span>Sexo *</span>
-							<select
-								className='w-full rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-base'
-								value={newSex}
-								onChange={(e) =>
-									setNewSex(e.target.value as 'M' | 'F' | 'X' | 'ALL')
-								}
-								disabled={savingNew}
+						<div className='flex flex-col sm:flex-row-reverse sm:justify-end gap-3 mt-4'>
+							<button
+								className='bg-emerald-600 text-white font-semibold text-sm px-4 py-2 rounded-lg active:scale-95 disabled:opacity-50'
+								disabled={saving}
+								onClick={handleSave}
 							>
-								<option value='M'>M (Masculino)</option>
-								<option value='F'>F (Femenino)</option>
-								<option value='X'>X (No Binario)</option>
-								<option value='ALL'>ALL (General)</option>
-							</select>
-						</label>
-
-						{/* Rango de edad */}
-						<div className='grid grid-cols-2 gap-3'>
-							<label className='text-sm flex flex-col gap-1'>
-								<span>Edad mínima *</span>
-								<input
-									className='w-full rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-base'
-									value={newAgeMin}
-									onChange={(e) => setNewAgeMin(e.target.value)}
-									disabled={savingNew}
-									placeholder='30'
-								/>
-							</label>
-
-							<label className='text-sm flex flex-col gap-1'>
-								<span>Edad máxima *</span>
-								<input
-									className='w-full rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-base'
-									value={newAgeMax}
-									onChange={(e) => setNewAgeMax(e.target.value)}
-									disabled={savingNew}
-									placeholder='39'
-								/>
-							</label>
+								{saving ? 'Guardando...' : 'Guardar'}
+							</button>
+							<button
+								className='bg-neutral-800 text-white border border-neutral-600 font-semibold text-sm px-4 py-2 rounded-lg active:scale-95 disabled:opacity-50'
+								disabled={saving}
+								onClick={() => setShowModal(false)}
+							>
+								Cancelar
+							</button>
 						</div>
 
-						{/* Activa */}
-						<label className='text-sm flex items-center gap-2'>
-							<input
-								type='checkbox'
-								className='w-4 h-4 accent-emerald-600'
-								checked={newIsActive}
-								onChange={(e) => setNewIsActive(e.target.checked)}
-								disabled={savingNew}
-							/>
-							<span className='text-white text-[13px]'>
-								Categoría activa (participa en clasificación)
-							</span>
-						</label>
+						<div className='text-[10px] text-neutral-600 mt-3 leading-tight'>
+							Estas categorías se usan para asignar automáticamente cada
+							corredor desde la pantalla de Participantes.
+						</div>
+					</div>
+				</div>
+			)}
 
-						{/* Config nombre */}
-						<div className='border border-neutral-700 rounded-lg p-3 bg-neutral-800/30 flex flex-col gap-3'>
-							<div className='text-white text-sm font-semibold'>
-								Nombre automático
+			{/* MODAL BULK */}
+			{showBulk && (
+				<div className='fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 overflow-y-auto'>
+					<div className='w-full max-w-lg bg-neutral-900 border border-neutral-700 rounded-2xl p-4 text-white'>
+						<div className='flex items-start justify-between mb-3'>
+							<div>
+								<div className='text-lg font-semibold'>
+									Generación masiva de categorías
+								</div>
+								<div className='text-[11px] text-neutral-500 leading-tight'>
+									Distancias × Sexos × Rangos de edad → muchas filas.
+								</div>
 							</div>
-							<div className='text-[11px] text-neutral-400 leading-tight'>
-								Podés usar:
-								<br />
-								[[distancia]] [[sexo]] [[edad_min]] [[edad_max]]
-							</div>
+							<button
+								className='text-neutral-400 text-sm'
+								onClick={() => {
+									if (!bulkSaving) setShowBulk(false);
+								}}
+							>
+								✕
+							</button>
+						</div>
 
-							<label className='text-sm flex flex-col gap-1'>
-								<span>Plantilla</span>
+						{bulkErr && (
+							<div className='text-red-400 text-sm bg-red-950/30 border border-red-700 rounded-lg px-3 py-2 mb-3'>
+								{bulkErr}
+							</div>
+						)}
+
+						<div className='grid grid-cols-2 gap-3 text-[13px]'>
+							{/* Distancias */}
+							<div className='flex flex-col col-span-2'>
+								<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
+									Distancias (km) *
+								</div>
 								<input
-									className='w-full rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-[13px]'
+									className='rounded-lg bg-neutral-800 border border-neutral-600 px-2 py-2 text-[13px] text-white'
+									value={bulkDistances}
+									onChange={(e) => setBulkDistances(e.target.value)}
+									placeholder='5,10,21'
+								/>
+								<div className='text-[10px] text-neutral-500 mt-1'>
+									Separadas por coma
+								</div>
+							</div>
+
+							{/* Rangos */}
+							<div className='flex flex-col col-span-2'>
+								<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
+									Rangos de edad *
+								</div>
+								<textarea
+									className='rounded-lg bg-neutral-800 border border-neutral-600 px-2 py-2 text-[13px] text-white min-h-[90px]'
+									value={bulkRanges}
+									onChange={(e) => setBulkRanges(e.target.value)}
+								/>
+								<div className='text-[10px] text-neutral-500 mt-1'>
+									Uno por línea, formato: 18-29
+								</div>
+							</div>
+
+							{/* Sexos */}
+							<div className='flex flex-col col-span-2'>
+								<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
+									Sexos a generar *
+								</div>
+								<textarea
+									className='rounded-lg bg-neutral-800 border border-neutral-600 px-2 py-2 text-[13px] text-white min-h-[70px]'
+									value={bulkSexes}
+									onChange={(e) => setBulkSexes(e.target.value)}
+								/>
+								<div className='text-[10px] text-neutral-500 mt-1'>
+									Ej: M / F / X / ALL (uno por línea)
+								</div>
+							</div>
+
+							{/* Activa sí/no */}
+							<div className='flex flex-col'>
+								<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
+									Crear como activas
+								</div>
+								<select
+									className='rounded-lg bg-neutral-800 border border-neutral-600 px-2 py-2 text-[13px] text-white'
+									value={bulkActive ? '1' : '0'}
+									onChange={(e) => setBulkActive(e.target.value === '1')}
+								>
+									<option value='1'>Sí</option>
+									<option value='0'>No</option>
+								</select>
+								<div className='text-[10px] text-neutral-500 mt-1'>
+									Sólo las activas se usan en premiación
+								</div>
+							</div>
+
+							{/* Nombre automático / template */}
+							<div className='flex flex-col'>
+								<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
+									Nombre automático
+								</div>
+								<select
+									className='rounded-lg bg-neutral-800 border border-neutral-600 px-2 py-2 text-[13px] text-white'
+									value={useAutoName ? '1' : '0'}
+									onChange={(e) => setUseAutoName(e.target.value === '1')}
+								>
+									<option value='1'>Sí</option>
+									<option value='0'>No (usar texto tal cual)</option>
+								</select>
+								<div className='text-[10px] text-neutral-500 mt-1'>
+									Si elegís "No", se usa el template literal sin reemplazos.
+								</div>
+							</div>
+
+							<div className='flex flex-col'>
+								<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
+									Sexo en el nombre
+								</div>
+								<select
+									className='rounded-lg bg-neutral-800 border border-neutral-600 px-2 py-2 text-[13px] text-white'
+									value={sexoEnNombre ? '1' : '0'}
+									onChange={(e) => setSexoEnNombre(e.target.value === '1')}
+								>
+									<option value='1'>Largo (FEMENINO / MASCULINO)</option>
+									<option value='0'>Corto (F / M / ALL)</option>
+								</select>
+								<div className='text-[10px] text-neutral-500 mt-1'>
+									Sólo aplica si Nombre automático = Sí
+								</div>
+							</div>
+
+							<div className='flex flex-col col-span-2'>
+								<div className='text-[11px] text-neutral-400 uppercase tracking-wide'>
+									Plantilla nombre
+								</div>
+								<input
+									className='rounded-lg bg-neutral-800 border border-neutral-600 px-2 py-2 text-[13px] text-white'
 									value={nameTemplate}
 									onChange={(e) => setNameTemplate(e.target.value)}
-									disabled={savingNew}
 								/>
-							</label>
-
-							<label className='text-sm flex flex-col gap-1'>
-								<span>Sexo en el nombre</span>
-								<select
-									className='w-full rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-[13px]'
-									value={sexLabelMode}
-									onChange={(e) =>
-										setSexLabelMode(e.target.value as 'inicial' | 'completo')
-									}
-									disabled={savingNew}
-								>
-									<option value='inicial'>Inicial (M / F / X / ALL)</option>
-									<option value='completo'>
-										Completo (MASCULINO / FEMENINO / NO BINARIO / GENERAL)
-									</option>
-								</select>
-							</label>
-
-							<div className='text-[11px] text-neutral-400 leading-tight'>
-								Vista previa:
-							</div>
-							<div className='text-white text-[13px] font-semibold bg-neutral-800 border border-neutral-600 rounded-lg px-3 py-2 break-words'>
-								{previewSingleName || '—'}
+								<div className='text-[10px] text-neutral-500 mt-1'>
+									Placeholders: [[distancia]] [[sexo]] [[edad_min]] [[edad_max]]
+								</div>
 							</div>
 						</div>
 
-						<button
-							className='w-full bg-emerald-600 text-white font-semibold text-base px-4 py-3 rounded-lg active:scale-95 disabled:opacity-50 disabled:active:scale-100'
-							disabled={savingNew}
-							onClick={handleCreateCategory}
-						>
-							{savingNew ? 'Guardando...' : 'Crear categoría'}
-						</button>
-					</div>
-				</div>
-			)}
-
-			{/* MODAL MASIVO */}
-			{showBulkModal && (
-				<div className='fixed inset-0 flex items-center justify-center bg-black/70 p-4 z-[110]'>
-					<div className='w-full max-w-sm bg-neutral-900 border border-neutral-700 rounded-xl p-4 flex flex-col gap-4 max-h-[90vh] overflow-y-auto'>
-						<div className='flex items-start justify-between'>
-							<div className='text-lg font-semibold text-white'>
-								Creación masiva
-							</div>
+						<div className='flex flex-col sm:flex-row-reverse sm:justify-end gap-3 mt-4'>
 							<button
-								className='text-neutral-400 text-sm'
-								disabled={savingBulk}
-								onClick={() => {
-									if (!savingBulk) {
-										setShowBulkModal(false);
-										setBulkErr('');
-									}
-								}}
+								className='bg-blue-600 text-white font-semibold text-sm px-4 py-2 rounded-lg active:scale-95 disabled:opacity-50'
+								disabled={bulkSaving}
+								onClick={handleBulkCreate}
 							>
-								✕
+								{bulkSaving ? 'Generando...' : 'Crear categorías masivas'}
+							</button>
+							<button
+								className='bg-neutral-800 text-white border border-neutral-600 font-semibold text-sm px-4 py-2 rounded-lg active:scale-95 disabled:opacity-50'
+								disabled={bulkSaving}
+								onClick={() => setShowBulk(false)}
+							>
+								Cancelar
 							</button>
 						</div>
 
-						{bulkErr && <div className='text-red-400 text-sm'>{bulkErr}</div>}
-
-						<div className='text-[11px] text-neutral-400 leading-tight'>
-							Genera múltiples categorías combinando distancias, sexos y rangos
-							de edad.
+						<div className='text-[10px] text-neutral-600 mt-3 leading-tight'>
+							Se generan TODAS las combinaciones Distancia × Sexo × Rango.
+							Ejemplo: (5K, F, 21-35) se convierte en una categoría con
+							sex_filter="F", distance_km=5, age_min=21, age_max=35.
 						</div>
-
-						{/* Distancias */}
-						<label className='text-sm flex flex-col gap-1'>
-							<span>Distancias (km) separadas por coma *</span>
-							<input
-								className='w-full rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-[13px]'
-								value={bulkDistances}
-								onChange={(e) => setBulkDistances(e.target.value)}
-								disabled={savingBulk}
-								placeholder='5,10,21'
-							/>
-							<div className='text-[10px] text-neutral-500 leading-tight'>
-								Ej: 5,10,21
-							</div>
-						</label>
-
-						{/* Rangos edad */}
-						<label className='text-sm flex flex-col gap-1'>
-							<span>Rangos de edad (uno por línea) *</span>
-							<textarea
-								className='w-full rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-[13px] min-h-[80px]'
-								value={bulkAgeGroups}
-								onChange={(e) => setBulkAgeGroups(e.target.value)}
-								disabled={savingBulk}
-								placeholder={
-									'16-20\n21-35\n36-40\n41-50\n51-55\n56-60\n61-65\n66-99'
-								}
-							/>
-							<div className='text-[10px] text-neutral-500 leading-tight'>
-								Formato min-max. Ej: 18-29
-							</div>
-						</label>
-
-						{/* Sexos */}
-						<div className='text-sm flex flex-col gap-2'>
-							<span>Sexos a generar *</span>
-							<div className='grid grid-cols-2 gap-2 text-white text-[13px]'>
-								<label className='flex items-center gap-2'>
-									<input
-										type='checkbox'
-										className='w-4 h-4 accent-emerald-600'
-										checked={bulkSexM}
-										onChange={(e) => setBulkSexM(e.target.checked)}
-										disabled={savingBulk}
-									/>
-									<span>M</span>
-								</label>
-
-								<label className='flex items-center gap-2'>
-									<input
-										type='checkbox'
-										className='w-4 h-4 accent-emerald-600'
-										checked={bulkSexF}
-										onChange={(e) => setBulkSexF(e.target.checked)}
-										disabled={savingBulk}
-									/>
-									<span>F</span>
-								</label>
-
-								<label className='flex items-center gap-2'>
-									<input
-										type='checkbox'
-										className='w-4 h-4 accent-emerald-600'
-										checked={bulkSexX}
-										onChange={(e) => setBulkSexX(e.target.checked)}
-										disabled={savingBulk}
-									/>
-									<span>X</span>
-								</label>
-
-								<label className='flex items-center gap-2'>
-									<input
-										type='checkbox'
-										className='w-4 h-4 accent-emerald-600'
-										checked={bulkSexAll}
-										onChange={(e) => setBulkSexAll(e.target.checked)}
-										disabled={savingBulk}
-									/>
-									<span>ALL</span>
-								</label>
-							</div>
-						</div>
-
-						{/* Activas */}
-						<label className='text-sm flex items-center gap-2'>
-							<input
-								type='checkbox'
-								className='w-4 h-4 accent-emerald-600'
-								checked={bulkActive}
-								onChange={(e) => setBulkActive(e.target.checked)}
-								disabled={savingBulk}
-							/>
-							<span className='text-white text-[13px]'>
-								Crear todas como ACTIVAS
-							</span>
-						</label>
-
-						{/* Config nombre masivo */}
-						<div className='border border-neutral-700 rounded-lg p-3 bg-neutral-800/30 flex flex-col gap-3'>
-							<div className='text-white text-sm font-semibold'>
-								Nombre automático
-							</div>
-							<div className='text-[11px] text-neutral-400 leading-tight'>
-								Usamos esta misma plantilla para TODAS las categorías generadas.
-								<br />
-								Placeholders:
-								<br />
-								[[distancia]] [[sexo]] [[edad_min]] [[edad_max]]
-							</div>
-
-							<label className='text-sm flex flex-col gap-1'>
-								<span>Plantilla masiva</span>
-								<input
-									className='w-full rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-[13px]'
-									value={bulkTemplate}
-									onChange={(e) => setBulkTemplate(e.target.value)}
-									disabled={savingBulk}
-								/>
-							</label>
-
-							<label className='text-sm flex flex-col gap-1'>
-								<span>Sexo en el nombre</span>
-								<select
-									className='w-full rounded-lg bg-neutral-800 border border-neutral-600 px-3 py-2 text-white text-[13px]'
-									value={bulkSexLabelMode}
-									onChange={(e) =>
-										setBulkSexLabelMode(
-											e.target.value as 'inicial' | 'completo'
-										)
-									}
-									disabled={savingBulk}
-								>
-									<option value='inicial'>Inicial (M / F / X / ALL)</option>
-									<option value='completo'>
-										Completo (MASCULINO / FEMENINO / NO BINARIO / GENERAL)
-									</option>
-								</select>
-							</label>
-						</div>
-
-						<button
-							className='w-full bg-blue-600 text-white font-semibold text-base px-4 py-3 rounded-lg active:scale-95 disabled:opacity-50 disabled:active:scale-100'
-							disabled={savingBulk}
-							onClick={handleBulkCreate}
-						>
-							{savingBulk ? 'Generando...' : 'Crear categorías masivas'}
-						</button>
 					</div>
 				</div>
 			)}
 
-			{/* NOTA FINAL */}
+			{/* FOOTER */}
 			<div className='mt-8 text-[11px] text-neutral-500 leading-relaxed border-t border-neutral-800 pt-4'>
 				<div className='mb-2 font-medium text-neutral-300 text-[12px]'>
-					Roadmap siguiente:
+					Notas operativas:
 				</div>
 				<ol className='list-decimal list-inside space-y-1'>
 					<li>
-						Botón “Recalcular categorías” en Participantes → asignar cada
-						corredor automáticamente según distancia / sexo / edad y SOLO usando
-						categorías activas.
+						Sólo las categorías con <b>is_active = true</b> se usan para asignar
+						corredores automáticamente.
 					</li>
-					<li>Podios rápidos / clasificación filtrada por categoría.</li>
+					<li>
+						El algoritmo matchea por distancia_km, sexo y edad. Si un corredor
+						no tiene edad o distancia, no se le asigna categoría.
+					</li>
+					<li>
+						Después de cargar o ajustar categorías, andá a “Participantes” y
+						apretá “Recalcular categorías”.
+					</li>
 				</ol>
 			</div>
 		</main>
