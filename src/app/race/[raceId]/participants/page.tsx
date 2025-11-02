@@ -42,6 +42,10 @@ type ParticipantRow = {
 	category_id: number | null;
 	category: { name: string } | null; // relación 1:1
 	status: string | null;
+
+	// NUEVO: flags operativos de acreditación
+	chip_delivered: boolean | null;
+	kit_delivered: boolean | null;
 };
 
 // para la importación
@@ -65,14 +69,11 @@ export default function ParticipantsPage({
 	params: Promise<{ raceId: string }>;
 }) {
 	const { raceId: raceIdStr } = use(params);
+	theRaceIdGuard(raceIdStr); // sanity mínima
 	const raceId = Number(raceIdStr);
 
 	const router = useRouter();
 
-	// Ajustá esta función si tu ruta pública de detalle es distinta
-	// Ejemplos alternativos:
-	// return `/public/race/${raceId}/participants/${pid}`;
-	// return `/participants/${pid}`;
 	function getParticipantDetailPath(pid: number) {
 		return `/race/${raceId}/participants/${pid}`;
 	}
@@ -189,7 +190,7 @@ export default function ParticipantsPage({
 			setCategories((cdata || []) as CategoryRow[]);
 		}
 
-		// 3. participantes (IMPORTANTE: select sin campos fantasma)
+		// 3. participantes
 		const { data: pdata, error: perr } = await supabase
 			.from('participants')
 			.select(
@@ -207,7 +208,9 @@ export default function ParticipantsPage({
           distance_km,
           category_id,
           category:categories ( name ),
-          status
+          status,
+          chip_delivered,
+          kit_delivered
         `
 			)
 			.eq('race_id', raceId)
@@ -281,7 +284,7 @@ export default function ParticipantsPage({
 	}, [participants]);
 
 	// ------------------------------
-	// Agrupar por categoría (para vista podio)
+	// Agrupar por categoría
 	// ------------------------------
 	const participantsByCategory = useMemo(() => {
 		const groups: Record<string, ParticipantRow[]> = {};
@@ -311,7 +314,7 @@ export default function ParticipantsPage({
 		return groups;
 	}, [participants]);
 
-	// Lista “sin categoría” limpia
+	// Lista “sin categoría”
 	const unassignedParticipants = useMemo(
 		() =>
 			participants.filter(
@@ -602,6 +605,10 @@ export default function ParticipantsPage({
 				age: row.age,
 				status: 'registered',
 				age_snapshot: final_age_snapshot,
+
+				// nuevos campos operativos inicializados en false
+				chip_delivered: false,
+				kit_delivered: false,
 			});
 		}
 
@@ -809,7 +816,57 @@ export default function ParticipantsPage({
 	}
 
 	// ------------------------------
-	// Recalcular categorías (auto-asignar category_id)
+	// Toggle chip / kit entregado (mesa de acreditación)
+	// ------------------------------
+	async function toggleChipDelivered(p: ParticipantRow) {
+		if (!race) return;
+		const newValue = !p.chip_delivered;
+
+		const { error } = await supabase
+			.from('participants')
+			.update({ chip_delivered: newValue })
+			.eq('id', p.id)
+			.eq('race_id', race.id);
+
+		if (error) {
+			console.error(error);
+			alert('No pude actualizar chip.');
+			return;
+		}
+
+		// refresco local sin recargar todo
+		setParticipants((prev) =>
+			prev.map((row) =>
+				row.id === p.id ? { ...row, chip_delivered: newValue } : row
+			)
+		);
+	}
+
+	async function toggleKitDelivered(p: ParticipantRow) {
+		if (!race) return;
+		const newValue = !p.kit_delivered;
+
+		const { error } = await supabase
+			.from('participants')
+			.update({ kit_delivered: newValue })
+			.eq('id', p.id)
+			.eq('race_id', race.id);
+
+		if (error) {
+			console.error(error);
+			alert('No pude actualizar kit.');
+			return;
+		}
+
+		setParticipants((prev) =>
+			prev.map((row) =>
+				row.id === p.id ? { ...row, kit_delivered: newValue } : row
+			)
+		);
+	}
+
+	// ------------------------------
+	// Recalcular categorías
 	// ------------------------------
 	async function handleAssignCategories() {
 		if (!race) return;
@@ -1150,6 +1207,7 @@ export default function ParticipantsPage({
 								<li>DNI no se puede repetir en la misma carrera</li>
 								<li>chip = "LT" + dorsal padded (00123)</li>
 								<li>age_snapshot se setea con edad o default 99</li>
+								<li>chip_delivered / kit_delivered arrancan en false</li>
 							</ul>
 						</div>
 					</div>
@@ -1163,7 +1221,8 @@ export default function ParticipantsPage({
 								Gestión manual
 							</div>
 							<div className='text-[11px] text-neutral-500 leading-tight'>
-								Alta, edición, baja y recálculo de categoría.
+								Alta, edición, baja, recálculo de categoría y entrega de
+								kit/chip.
 							</div>
 						</div>
 						<div className='flex-shrink-0'>
@@ -1213,77 +1272,111 @@ export default function ParticipantsPage({
 							filteredParticipants.map((p, idx) => (
 								<div
 									key={p.id}
-									role='button'
-									tabIndex={0}
-									onClick={() => router.push(getParticipantDetailPath(p.id))}
-									onKeyDown={(e) => {
-										if (e.key === 'Enter' || e.key === ' ') {
-											e.preventDefault();
-											router.push(getParticipantDetailPath(p.id));
-										}
-									}}
 									className={`rounded-xl border border-neutral-700 ${
 										idx % 2 === 0 ? 'bg-neutral-900' : 'bg-neutral-950/40'
-									} p-3 text-[13px] text-neutral-200 cursor-pointer hover:bg-neutral-900/70 transition`}
-									aria-label='Ver detalle de participante'
+									} p-3 text-[13px] text-neutral-200`}
 								>
+									{/* HEADER */}
 									<div className='flex flex-wrap justify-between gap-x-2 gap-y-1'>
 										<div className='font-semibold text-white leading-tight'>
 											{p.last_name}, {p.first_name}
 											<div className='text-[10px] text-neutral-500 leading-tight'>
-												#{p.id}
+												DNI {p.dni} · #{p.id}
 											</div>
 										</div>
-										<div className='text-right text-neutral-300'>
-											Dorsal:{' '}
-											<span className='text-white font-semibold'>
-												{p.bib_number ?? '—'}
-											</span>
+										<div className='text-right text-neutral-300 text-[12px] leading-tight'>
+											<div>
+												Dorsal:{' '}
+												<span className='text-white font-semibold'>
+													{p.bib_number ?? '—'}
+												</span>
+											</div>
+											<div>
+												Dist:{' '}
+												<span className='text-white font-semibold'>
+													{p.distance_km != null ? `${p.distance_km}K` : '—'}
+												</span>
+											</div>
 										</div>
 									</div>
 
-									<div className='grid grid-cols-2 gap-x-4 gap-y-1 mt-2 text-[12px]'>
-										<div className='text-neutral-400'>DNI</div>
-										<div className='text-neutral-200'>{p.dni}</div>
+									{/* DATOS */}
+									<div className='grid grid-cols-2 gap-x-4 gap-y-1 mt-3 text-[12px]'>
+										<div className='text-neutral-400'>Sexo</div>
+										<div className='text-neutral-200'>{p.sex || '—'}</div>
 
-										<div className='text-neutral-400'>Distancia</div>
+										<div className='text-neutral-400'>Edad</div>
 										<div className='text-neutral-200'>
-											{p.distance_km != null ? `${p.distance_km}K` : '—'}
+											{p.age != null ? p.age : '—'}
 										</div>
 
-										<div className='text-neutral-400'>Cat.</div>
+										<div className='text-neutral-400'>Categoría</div>
 										<div className='text-neutral-200'>
 											{p.category && p.category.name ? p.category.name : '—'}
 										</div>
+
+										<div className='text-neutral-400'>Chip</div>
+										<div className='text-neutral-200'>{p.chip || '—'}</div>
 									</div>
 
-									{/* Acciones: Ver (primario), Editar, Borrar.
-                      stopPropagation para no disparar el onClick del card */}
-									<div className='flex flex-wrap justify-end gap-3 mt-3 text-[12px]'>
+									{/* CHECKBOXES OPERACIÓN EN MESA */}
+									<div className='flex flex-wrap items-center gap-4 mt-4 text-[12px]'>
+										<label className='flex items-center gap-2'>
+											<input
+												type='checkbox'
+												className='accent-emerald-500 w-4 h-4'
+												checked={!!p.chip_delivered}
+												onChange={() => toggleChipDelivered(p)}
+											/>
+											<span
+												className={
+													p.chip_delivered
+														? 'text-emerald-400 font-semibold'
+														: 'text-neutral-300'
+												}
+											>
+												Chip entregado
+											</span>
+										</label>
+
+										<label className='flex items-center gap-2'>
+											<input
+												type='checkbox'
+												className='accent-emerald-500 w-4 h-4'
+												checked={!!p.kit_delivered}
+												onChange={() => toggleKitDelivered(p)}
+											/>
+											<span
+												className={
+													p.kit_delivered
+														? 'text-emerald-400 font-semibold'
+														: 'text-neutral-300'
+												}
+											>
+												Kit entregado
+											</span>
+										</label>
+									</div>
+
+									{/* ACCIONES */}
+									<div className='flex flex-wrap justify-end gap-3 mt-4 text-[12px]'>
 										<button
 											className='bg-blue-600 px-3 py-1.5 rounded-md text-white font-semibold active:scale-95'
-											onClick={(e) => {
-												e.stopPropagation();
-												router.push(getParticipantDetailPath(p.id));
-											}}
+											onClick={() =>
+												router.push(getParticipantDetailPath(p.id))
+											}
 										>
 											Ver
 										</button>
 										<button
 											className='text-emerald-400 underline active:scale-95'
-											onClick={(e) => {
-												e.stopPropagation();
-												openEditParticipant(p);
-											}}
+											onClick={() => openEditParticipant(p)}
 										>
 											Editar
 										</button>
 										<button
 											className='text-red-400 underline active:scale-95'
-											onClick={(e) => {
-												e.stopPropagation();
-												handleDeleteParticipant(p);
-											}}
+											onClick={() => handleDeleteParticipant(p)}
 										>
 											Borrar
 										</button>
@@ -1305,6 +1398,8 @@ export default function ParticipantsPage({
 									<th className='px-3 py-2 whitespace-nowrap'>Dist</th>
 									<th className='px-3 py-2 whitespace-nowrap'>Dorsal</th>
 									<th className='px-3 py-2 whitespace-nowrap'>Cat.</th>
+									<th className='px-3 py-2 whitespace-nowrap'>Chip ✓</th>
+									<th className='px-3 py-2 whitespace-nowrap'>Kit ✓</th>
 									<th className='px-3 py-2 whitespace-nowrap text-right'>
 										Acciones
 									</th>
@@ -1314,7 +1409,7 @@ export default function ParticipantsPage({
 								{filteredParticipants.length === 0 ? (
 									<tr>
 										<td
-											colSpan={6}
+											colSpan={8}
 											className='px-3 py-4 text-center text-neutral-500 text-[12px]'
 										>
 											Sin resultados.
@@ -1346,6 +1441,49 @@ export default function ParticipantsPage({
 											<td className='px-3 py-2 text-[13px] text-neutral-300'>
 												{p.category && p.category.name ? p.category.name : '—'}
 											</td>
+
+											{/* CHIP DELIVERED */}
+											<td className='px-3 py-2 text-[13px] text-neutral-300 align-top'>
+												<label className='flex items-center gap-2'>
+													<input
+														type='checkbox'
+														className='accent-emerald-500 w-4 h-4'
+														checked={!!p.chip_delivered}
+														onChange={() => toggleChipDelivered(p)}
+													/>
+													<span
+														className={
+															p.chip_delivered
+																? 'text-emerald-400 font-semibold text-[12px]'
+																: 'text-neutral-400 text-[12px]'
+														}
+													>
+														Chip
+													</span>
+												</label>
+											</td>
+
+											{/* KIT DELIVERED */}
+											<td className='px-3 py-2 text-[13px] text-neutral-300 align-top'>
+												<label className='flex items-center gap-2'>
+													<input
+														type='checkbox'
+														className='accent-emerald-500 w-4 h-4'
+														checked={!!p.kit_delivered}
+														onChange={() => toggleKitDelivered(p)}
+													/>
+													<span
+														className={
+															p.kit_delivered
+																? 'text-emerald-400 font-semibold text-[12px]'
+																: 'text-neutral-400 text-[12px]'
+														}
+													>
+														Kit
+													</span>
+												</label>
+											</td>
+
 											<td className='px-3 py-2 text-right text-[13px] text-neutral-300'>
 												<button
 													className='text-blue-400 underline text-[12px] mr-3'
@@ -1376,8 +1514,8 @@ export default function ParticipantsPage({
 					</div>
 
 					<div className='text-[10px] text-neutral-500 leading-tight'>
-						Edición manual te deja corregir edad, distancia, dorsal, etc. O
-						borrar inscriptos cargados de más.
+						Marcás chip/kit acá mismo. Edición manual te deja corregir edad,
+						distancia, dorsal, etc.
 					</div>
 				</div>
 			</div>
@@ -1788,6 +1926,13 @@ export default function ParticipantsPage({
 			)}
 		</main>
 	);
+}
+
+// sanity mínima para evitar raceId raro tipo NaN
+function theRaceIdGuard(v: string) {
+	if (!v || isNaN(Number(v))) {
+		console.warn('raceId inválido:', v);
+	}
 }
 
 // Componente para el mapeo de columnas en importación
