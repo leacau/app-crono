@@ -1238,10 +1238,6 @@ export default function ParticipantsPage({
 											>
 												{p.last_name}, {p.first_name}
 											</button>
-
-											<div className='text-[10px] text-neutral-500 leading-tight'>
-												#{p.id}
-											</div>
 										</div>
 										<div className='text-right text-neutral-300'>
 											Dorsal:{' '}
